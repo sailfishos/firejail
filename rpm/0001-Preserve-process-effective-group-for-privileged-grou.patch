@@ -1,0 +1,18 @@
+From d5db08f9453bf51137c54d8a6fb90727d83ed67d Wed, 15 Apr 2020 15:03:25 +0200
+From: Andrew Branson <andrew.branson@jolla.com>
+Date: Wed, 15 Apr 2020 14:12:17 +0200
+Subject: [PATCH] Preserve process effective group for privileged group support
+
+diff --git a/src/include/euid_common.h b/src/include/euid_common.h
+index d8277ad..0dd1c16 100644
+--- a/src/include/euid_common.h
++++ b/src/include/euid_common.h
+@@ -53,7 +53,7 @@
+ 
+ static inline void EUID_INIT(void) {
+ 	firejail_uid = getuid();
+-	firejail_gid = getgid();
++	firejail_gid = getegid();
+ }
+ 
+ #endif

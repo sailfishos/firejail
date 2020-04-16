@@ -4,6 +4,7 @@ Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+
 Source0: https://github.com/netblue30/firejail/archive/%{version}.tar.gz#/%{name}-%{version}.tar.gz
+Patch0:  0001-Preserve-process-effective-group-for-privileged-grou.patch
 URL: https://github.com/netblue30/firejail
 
 %description
@@ -19,7 +20,7 @@ Requires: %{name} = %{version}-%{release}
 %{summary}.
 
 %prep
-%setup -q -n %{name}-%{version}/upstream
+%autosetup -p1 -n %{name}-%{version}/upstream
 
 %build
 %configure \

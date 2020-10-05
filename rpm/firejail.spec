@@ -3,14 +3,14 @@ Version: 0.9.62.4
 Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+
-Source0: https://github.com/netblue30/firejail/archive/%{version}.tar.gz#/%{name}-%{version}.tar.gz
+Source0:  %{name}-%{version}.tar.bz2
 Patch0:  0001-Preserve-process-effective-group-for-privileged-grou.patch
 URL: https://github.com/netblue30/firejail
 
 %description
 Firejail is a SUID sandbox program that reduces the risk of security
 breaches by restricting the running environment of untrusted applications
-using Linux namespaces. It includes a sandbox profile for Mozilla Firefox.
+using Linux namespaces.
 
 %package doc
 Summary: Documentation for %{name}
@@ -24,6 +24,7 @@ Requires: %{name} = %{version}-%{release}
 
 %build
 %configure \
+    --disable-man \
     --disable-x11 \
     --disable-overlayfs \
     --disable-contrib-install
@@ -45,5 +46,3 @@ rm -rf %{buildroot}%{_datadir}/bash-completion
 %files doc
 %defattr(-,root,root,-)
 %{_docdir}/firejail
-%{_mandir}/man1/*
-%{_mandir}/man5/*

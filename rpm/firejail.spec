@@ -1,5 +1,5 @@
 Name: firejail
-Version: 0.9.62.4
+Version: 0.9.63
 Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+

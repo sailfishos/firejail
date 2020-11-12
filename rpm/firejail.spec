@@ -3,8 +3,8 @@ Version: 0.9.63
 Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+
-Source0:  %{name}-%{version}.tar.bz2
-Patch0:  0001-Preserve-process-effective-group-for-privileged-grou.patch
+Source0: %{name}-%{version}.tar.bz2
+Patch1:  0001-Preserve-process-effective-group-for-privileged-grou.patch
 URL: https://github.com/netblue30/firejail
 
 %description

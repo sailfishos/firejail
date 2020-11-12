@@ -1,0 +1,65 @@
+From c12ab15258d6e7e0c5e0ff65089f2b7875c6b98b Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Thu, 12 Nov 2020 16:04:53 +0200
+Subject: [PATCH] Add missing linefeeds in stderr logging
+
+Lacking linefeed chars cause messages to get concatenated.
+
+Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+---
+ src/firejail/fs_mkdir.c     | 4 ++--
+ src/firejail/main.c         | 2 +-
+ src/firejail/network_main.c | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/firejail/fs_mkdir.c b/src/firejail/fs_mkdir.c
+index 0e213f2f..db2b388a 100644
+--- a/src/firejail/fs_mkdir.c
++++ b/src/firejail/fs_mkdir.c
+@@ -46,7 +46,7 @@ static void mkdir_recursive(char *path) {
+ 	struct stat s;
+ 
+ 	if (chdir("/")) {
+-		fprintf(stderr, "Error: can't chdir to /");
++		fprintf(stderr, "Error: can't chdir to /\n");
+ 		return;
+ 	}
+ 
+@@ -63,7 +63,7 @@ static void mkdir_recursive(char *path) {
+ 			return;
+ 		}
+ 		if (chdir(subdir)) {
+-			fprintf(stderr, "Error: can't chdir to %s", subdir);
++			fprintf(stderr, "Error: can't chdir to %s\n", subdir);
+ 			return;
+ 		}
+ 
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 34e23e10..cfd68cf4 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -298,7 +298,7 @@ static void check_network(Bridge *br) {
+ 	else if (br->ipsandbox) { // for macvlan check network range
+ 		char *rv = in_netrange(br->ipsandbox, br->ip, br->mask);
+ 		if (rv) {
+-			fprintf(stderr, "%s", rv);
++			fprintf(stderr, "%s\n", rv);
+ 			exit(1);
+ 		}
+ 	}
+diff --git a/src/firejail/network_main.c b/src/firejail/network_main.c
+index 85896e52..9751ea19 100644
+--- a/src/firejail/network_main.c
++++ b/src/firejail/network_main.c
+@@ -120,7 +120,7 @@ void net_configure_sandbox_ip(Bridge *br) {
+ 		// check network range
+ 		char *rv = in_netrange(br->ipsandbox, br->ip, br->mask);
+ 		if (rv) {
+-			fprintf(stderr, "%s", rv);
++			fprintf(stderr, "%s\n", rv);
+ 			exit(1);
+ 		}
+ 		// send an ARP request and check if there is anybody on this IP address
+-- 
+2.17.1
+

@@ -1,0 +1,181 @@
+From 3565dae1c9ee1bc77a0472880fcb3773943e3d32 Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Thu, 5 Nov 2020 18:52:29 +0200
+Subject: [PATCH] Add utility functions for handing comma separated lists
+
+A lot of profile options deal with manipulating strings containing
+comma separated list of things, using several strains of similar but
+not exactly the same code, duplicated for the purposes of processing
+command line arguments and parsing configuration files.
+
+Having utility functions available for handling such list strings can
+make higher level logic shorter, cleaner and function in more uniform
+manner.
+
+Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+---
+ src/firejail/firejail.h |   3 +
+ src/firejail/profile.c  | 136 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 139 insertions(+)
+
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index 2bb8dd35..b8bdae88 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -449,6 +449,9 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
+ // add a profile entry in cfg.profile list; use str to populate the list
+ void profile_add(char *str);
+ void profile_add_ignore(const char *str);
++char *profile_list_normalize(char *list);
++char *profile_list_compress(char *list);
++void profile_list_augment(char **list, const char *items);
+ 
+ // list.c
+ void list(void);
+diff --git a/src/firejail/profile.c b/src/firejail/profile.c
+index 8c29fe81..9bc08b80 100644
+--- a/src/firejail/profile.c
++++ b/src/firejail/profile.c
+@@ -1748,3 +1748,139 @@ void profile_read(const char *fname) {
+ 	}
+ 	fclose(fp);
+ }
++
++char *profile_list_normalize(char *list)
++{
++	/* Remove redundant commas.
++	 *
++	 * As result is always shorter than original,
++	 * in-place copying can be used.
++	 */
++	size_t i = 0;
++	size_t j = 0;
++	int c;
++	while (list[i] == ',')
++		++i;
++	while ((c = list[i++])) {
++		if (c == ',') {
++			while (list[i] == ',')
++				++i;
++			if (list[i] == 0)
++				break;
++		}
++		list[j++] = c;
++	}
++	list[j] = 0;
++	return list;
++}
++
++char *profile_list_compress(char *list)
++{
++	/* Comma separated list is processed so that:
++	 * "item"  -> adds item to list
++	 * "-item" -> removes item from list
++	 * "+item" -> adds item to list
++	 * "=item" -> clear list, add item
++	 *
++	 * For example:
++	 * ,a,,,b,,,c, -> a,b,c
++	 * a,,b,,,c,a  -> a,b,c
++	 * a,b,c,-a    -> b,c
++	 * a,b,c,-a,a  -> b,c,a
++	 * a,+b,c      -> a,b,c
++	 * a,b,=c,d    -> c,d
++	 * a,b,c,=     ->
++	 */
++	profile_list_normalize(list);
++
++	/* Count items: comma count + 1 */
++	size_t count = 1;
++	for (size_t i=0; list[i]; ++i) {
++		if (list[i] == ',')
++			++count;
++	}
++
++	/* Collect items in an array */
++	char *in[count];
++	count = 0;
++	in[count++] = list;
++	for (size_t i=0; list[i]; ++i) {
++		if (list[i] != ',')
++			continue;
++		list[i] = 0;
++		in[count++] = list + i + 1;
++	}
++
++	/* Filter array: add, remove, reset, filter out duplicates */
++	for (size_t i = 0; i < count; ++i) {
++		char *item = in[i];
++
++		switch (*item) {
++		case '-':
++			++item;
++			/* Do not include this item */
++			in[i] = 0;
++			/* Remove if already included */
++			for (size_t k = 0; k < i; ++k) {
++				if (in[k] && !strcmp(in[k], item)) {
++					in[k] = 0;
++					break;
++				}
++			}
++			break;
++		case '+':
++			/* Allow +/- symmetry */
++			in[i] = ++item;
++			/* FALLTHRU */
++		default:
++			/* Adding empty item is a NOP */
++			if (!*item) {
++				in[i] = 0;
++				break;
++			}
++			/* Include item unless it is already included */
++			for (size_t k = 0; k < i; ++k) {
++				if (in[k] && !strcmp(in[k], item)) {
++					in[i] = 0;
++					break;
++				}
++			}
++			break;
++		case '=':
++			in[i] = ++item;
++			/* Include non-empty item */
++			if (!*item)
++				in[i] = 0;
++			/* Remove all allready included items */
++			for (size_t k = 0; k < i; ++k)
++				in[k] = 0;
++			break;
++		}
++	}
++
++	/* Copying back using in-place data works because the
++	 * original order is retained and no item gets longer
++	 * than what it used to be.
++	 */
++	char *pos = list;
++	for (size_t i = 0; i < count; ++i) {
++		char *item = in[i];
++		if (!item)
++			continue;
++		if (pos > list)
++			*pos++ = ',';
++		while (*item)
++			*pos++ = *item++;
++	}
++	*pos = 0;
++	return list;
++}
++
++void profile_list_augment(char **list, const char *items)
++{
++	char *tmp = 0;
++	if (asprintf(&tmp, "%s,%s", *list ?: "", items ?: "") < 0)
++		errExit("asprintf");
++	free(*list);
++	*list = profile_list_compress(tmp);
++}
+-- 
+2.17.1
+

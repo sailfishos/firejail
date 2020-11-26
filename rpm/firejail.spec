@@ -9,6 +9,7 @@ Patch2:  0002-Fix-symlinks-that-go-though-proc-self.patch
 Patch3:  0003-Add-utility-functions-for-handing-comma-separa.patch
 Patch4:  0004-Allow-changing-protocol-list-after-initial-set.patch
 Patch5:  0005-Add-missing-linefeeds-in-stderr-logging.patch
+Patch6:  0006-PATCH-Add-mkdir-and-mkfile-command-line-options-for-.patch
 URL: https://github.com/netblue30/firejail
 
 %description

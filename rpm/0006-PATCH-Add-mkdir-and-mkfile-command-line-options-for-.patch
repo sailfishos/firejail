@@ -1,0 +1,72 @@
+From fae2d6400914d4ec0d53d9fc0ef98c37583873b2 Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Tue, 24 Nov 2020 13:18:51 +0200
+Subject: [PATCH] Add --mkdir and --mkfile command line options for firejail
+
+Profile files are defined as a means to "pass several command line
+arguments to firejail" but apparently for example mkdir and mkfile
+options are available in context of profile files, but can't be
+specified directly from command line.
+
+Add support for -mkdir and --mkfile options so that executing:
+  firejail --mkdir=${HOME}/directory/path\
+           --whitelist==${HOME}/directory/path
+
+behaves similarly as having profile file content:
+  mkdir ${HOME}/directory/path
+  whitelist ${HOME}/directory/path
+
+Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+---
+ src/firejail/main.c  | 21 ++++++++++++++++++++-
+ src/firejail/usage.c |  2 ++
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index cfd68cf4..d52d53c9 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -1568,7 +1568,26 @@ int main(int argc, char **argv, char **envp) {
+ 			profile_add(line);
+ 		}
+ #endif
+-
++		else if (strncmp(argv[i], "--mkdir=", 8) == 0) {
++			char *line;
++			if (asprintf(&line, "mkdir %s", argv[i] + 8) == -1)
++				errExit("asprintf");
++			/* Note: Applied both immediately in profile_check_line()
++			 *       and later on via fs_blacklist().
++			 */
++			profile_check_line(line, 0, NULL);
++			profile_add(line);
++		}
++		else if (strncmp(argv[i], "--mkfile=", 9) == 0) {
++			char *line;
++			if (asprintf(&line, "mkfile %s", argv[i] + 9) == -1)
++				errExit("asprintf");
++			/* Note: Applied both immediately in profile_check_line()
++			 *       and later on via fs_blacklist().
++			 */
++			profile_check_line(line, 0, NULL);
++			profile_add(line);
++		}
+ 		else if (strncmp(argv[i], "--read-only=", 12) == 0) {
+ 			char *line;
+ 			if (asprintf(&line, "read-only %s", argv[i] + 12) == -1)
+diff --git a/src/firejail/usage.c b/src/firejail/usage.c
+index d58bbb40..190339f0 100644
+--- a/src/firejail/usage.c
++++ b/src/firejail/usage.c
+@@ -246,6 +246,8 @@ static char *usage_str =
+ #ifdef HAVE_WHITELIST
+ 	"    --whitelist=filename - whitelist directory or file.\n"
+ #endif
++	"    --mkdir=dirname - create a directory.\n"
++	"    --mkfile=filename - create a file.\n"
+ 	"    --writable-etc - /etc directory is mounted read-write.\n"
+ 	"    --writable-run-user - allow access to /run/user/$UID/systemd and\n"
+ 	"\t/run/user/$UID/gnupg.\n"
+-- 
+2.17.1
+

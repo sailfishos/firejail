@@ -1,0 +1,587 @@
+From e2bd14f8a6a6d8eab07b84c36c32b99cd5c8d28a Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Thu, 26 Nov 2020 19:29:29 +0200
+Subject: [PATCH] Implement Sailfish OS specific privileged-data option
+
+Adds privileged-data=DIR profile / command line option. This is a
+Sailfish OS specific feature that allows one to limit which portions of
+privileged user data is visible within sandbox while keeping the main
+privileged data directory permissions in such state that it will pass
+checks done in application/library code.
+
+Obtain and cache all relevant user and group ids as soon as feasible
+upon entry to main() function. As no-new-privs makes it impossible to
+execute target binary with euid=privileged intact, use ruid=euid for
+the purposes of sandbox setup and target binary execution.
+
+Expose subset of privileged data directories by creating an empty
+tmpfs mount under /run, mounting requested subdirectories in there and
+then mounting the resulting directory on top of the real private data
+directory.
+
+Refactor uid/gid mapping to avoid duplicate entries and/or exceeding
+kernel side entry count limitations. Map also relevant root and
+privileged user/group ids so that privileged owner checks and going
+back and forth between root/user privileges works inside sandbox.
+
+Fix get_group_id() return value type and return (gid_t)-1 when group
+is not found (instead of zero which is root gid). And add similar
+get_user_id() function.
+
+Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+---
+ src/firejail/firejail.h   |   5 +-
+ src/firejail/macros.c     |   9 ++++
+ src/firejail/main.c       | 107 ++++++++++++++++++++++----------------
+ src/firejail/profile.c    |  31 +++++++++++
+ src/firejail/sandbox.c    |  76 +++++++++++++++++++++++++++
+ src/firejail/usage.c      |   1 +
+ src/firejail/util.c       |  23 +++++---
+ src/include/euid_common.h |  86 +++++++++++++++++++++++-------
+ src/include/rundefs.h     |   1 +
+ 9 files changed, 266 insertions(+), 73 deletions(-)
+
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index b8bdae88..bcfe61c2 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -156,6 +156,7 @@ typedef struct config_t {
+ 	char *home_private_keep;	// keep list for private home directory
+ 	char *etc_private_keep;	// keep list for private etc directory
+ 	char *opt_private_keep;	// keep list for private opt directory
++	char *privileged_data_keep;	// keep list for privileged data
+ 	char *srv_private_keep;	// keep list for private srv directory
+ 	char *bin_private_keep;	// keep list for private bin directory
+ 	char *bin_private_lib;	// executable list sent by private-bin to private-lib
+@@ -449,6 +450,7 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
+ // add a profile entry in cfg.profile list; use str to populate the list
+ void profile_add(char *str);
+ void profile_add_ignore(const char *str);
++char *profile_list_slice(char *pos, char **ppos);
+ char *profile_list_normalize(char *list);
+ char *profile_list_compress(char *list);
+ void profile_list_augment(char **list, const char *items);
+@@ -518,7 +520,8 @@ void wait_for_other(int fd);
+ void notify_other(int fd);
+ const char *gnu_basename(const char *path);
+ uid_t pid_get_uid(pid_t pid);
+-uid_t get_group_id(const char *group);
++gid_t get_group_id(const char *group);
++uid_t get_user_id(const char *user);
+ int remove_overlay_directory(void);
+ void flush_stdin(void);
+ int create_empty_dir_as_user(const char *dir, mode_t mode);
+diff --git a/src/firejail/macros.c b/src/firejail/macros.c
+index 2623d794..8c3635b0 100644
+--- a/src/firejail/macros.c
++++ b/src/firejail/macros.c
+@@ -240,6 +240,13 @@ char *expand_macros(const char *path) {
+ 			EUID_ROOT();
+ 		return new_name;
+ 	}
++	else if (strncmp(path, "${PRIVILEGED}", 13) == 0) {
++		if (asprintf(&new_name, "%s/.local/share/system/privileged%s", cfg.homedir, path + 13) == -1)
++			errExit("asprintf");
++		if (called_as_root)
++			EUID_ROOT();
++		return new_name;
++	}
+ 	else {
+ 		char *directory = resolve_macro(path);
+ 		if (directory) {
+@@ -295,6 +302,8 @@ void invalid_filename(const char *fname, int globbing) {
+ 		ptr = fname + 7;
+ 	else if (strncmp(ptr, "${RUNUSER}", 10) == 0)
+ 		ptr = fname + 10;
++	else if (strncmp(ptr, "${PRIVILEGED}", 13) == 0)
++		ptr = fname + 13;
+ 	else {
+ 		int id = macro_id(fname);
+ 		if (id != -1)
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index d52d53c9..150ee96f 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -53,8 +53,7 @@ int __clone2(int (*fn)(void *),
+               /* pid_t *ptid, struct user_desc *tls, pid_t *ctid */ );
+ #endif
+ 
+-uid_t firejail_uid = 0;
+-gid_t firejail_gid = 0;
++euid_data_t euid_data = EUID_DATA_INIT;
+ 
+ #define STACK_SIZE (1024 * 1024)
+ #define STACK_ALIGNMENT 16
+@@ -981,7 +980,7 @@ int main(int argc, char **argv, char **envp) {
+ 	fix_std_streams();
+ 
+ 	// drop permissions by default and rise them when required
+-	EUID_INIT();
++	EUID_INIT(*argv);
+ 	EUID_USER();
+ 
+ 	// argument count should be larger than 0
+@@ -1957,6 +1956,12 @@ int main(int argc, char **argv, char **envp) {
+ 				cfg.opt_private_keep = argv[i] + 14;
+ 			arg_private_opt = 1;
+ 		}
++		else if (strncmp(argv[i], "--privileged-data=", 18) == 0) {
++			const char *arg = argv[i] + 18;
++			profile_list_augment(&cfg.privileged_data_keep, arg);
++			if (arg_debug)
++				fprintf(stderr, "[option] combined privileged-data list: \"%s\"\n", cfg.privileged_data_keep);
++		}
+ 		else if (strncmp(argv[i], "--private-srv=", 14) == 0) {
+ 			// extract private srv list
+ 			if (*(argv[i] + 14) == '\0') {
+@@ -2994,64 +2999,74 @@ int main(int argc, char **argv, char **envp) {
+ 
+  	if (arg_noroot) {
+ 	 	// update the UID and GID maps in the new child user namespace
+-		// uid
+-	 	char *map_path;
+-	 	if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
+-	 		errExit("asprintf");
+ 
+-	 	char *map;
+-	 	uid_t uid = getuid();
+-	 	if (asprintf(&map, "%d %d 1", uid, uid) == -1)
++		/* NB: In Linux 4.14 and earlier, id mapping data can have at
++		 *     maximum 5 lines - see user_namespaces (7) for details. */
++		const int id_max = 5;
++		int id_data[id_max];
++		int id_cnt = 0;
++		char *map_path = 0;
++		char map_data[1024];
++
++		auto void id_add(int id) {
++			if (id != -1) {
++				for (int i = 0; ; ++i) {
++					if (i == id_max) {
++						fprintf(stderr, "%s: skip id: %d (overflow)\n", map_path, id);
++						break;
++					}
++					if (i == id_cnt) {
++						id_data[id_cnt++] = id;
++						break;
++					}
++					if (id_data[i] == id)
++						break;
++				}
++			}
++		}
++
++		auto char *id_map(void) {
++			char *ptr = map_data;
++			for (int i = 0; i < id_cnt; ++i) {
++				sprintf(ptr, "%d %d 1\n", id_data[i], id_data[i]);
++				ptr += strlen(ptr);
++			}
++			*ptr = 0;
++			id_cnt = 0;
++			return map_data;
++		}
++
++		// UIDs
++		if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
+ 	 		errExit("asprintf");
+- 		EUID_ROOT();
+-	 	update_map(map, map_path);
++		id_add(0);
++		id_add(euid_data.uid);
++		id_add(euid_data.privileged_uid);
++		EUID_ROOT();
++		update_map(id_map(), map_path);
+ 	 	EUID_USER();
+-	 	free(map);
+ 	 	free(map_path);
+ 
+-	 	// gid file
++		// GIDs
+ 		if (asprintf(&map_path, "/proc/%d/gid_map", child) == -1)
+ 			errExit("asprintf");
+-	 	char gidmap[1024];
+-	 	char *ptr = gidmap;
+-	 	*ptr = '\0';
+-
+-	 	// add user group
+-	 	gid_t gid = getgid();
+-	 	sprintf(ptr, "%d %d 1\n", gid, gid);
+-	 	ptr += strlen(ptr);
+-
++		id_add(0);
++		id_add(euid_data.gid);
++		id_add(euid_data.primary_gid);
++		id_add(euid_data.privileged_gid);
+ 	 	if (!arg_nogroups) {
+ 		 	//  add tty group
+-		 	gid_t g = get_group_id("tty");
+-		 	if (g) {
+-		 		sprintf(ptr, "%d %d 1\n", g, g);
+-		 		ptr += strlen(ptr);
+-		 	}
+-
++			id_add(get_group_id("tty"));
+ 		 	//  add audio group
+-		 	g = get_group_id("audio");
+-		 	if (g) {
+-		 		sprintf(ptr, "%d %d 1\n", g, g);
+-		 		ptr += strlen(ptr);
+-		 	}
+-
++			id_add(get_group_id("audio"));
+ 		 	//  add video group
+-		 	g = get_group_id("video");
+-		 	if (g) {
+-		 		sprintf(ptr, "%d %d 1\n", g, g);
+-		 		ptr += strlen(ptr);
+-		 	}
+-
++			id_add(get_group_id("video"));
+ 		 	//  add games group
+-		 	g = get_group_id("games");
+-		 	if (g) {
+-		 		sprintf(ptr, "%d %d 1\n", g, g);
+-		 	}
++			id_add(get_group_id("games"));
+ 		 }
+ 
+  		EUID_ROOT();
+-	 	update_map(gidmap, map_path);
++		update_map(id_map(), map_path);
+ 	 	EUID_USER();
+ 	 	free(map_path);
+  	}
+diff --git a/src/firejail/profile.c b/src/firejail/profile.c
+index d623f417..aaf185ae 100644
+--- a/src/firejail/profile.c
++++ b/src/firejail/profile.c
+@@ -1269,6 +1269,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
+ 		return 0;
+ 	}
+ 
++	// private /privileged list of files and directories
++	if (strncmp(ptr, "privileged-data ", 16) == 0) {
++		const char *arg = ptr + 16;
++		profile_list_augment(&cfg.privileged_data_keep, arg);
++		if (arg_debug)
++			fprintf(stderr, "[profile] combined privileged-data list: \"%s\"\n", cfg.privileged_data_keep);
++		return 0;
++	}
++
+ 	// private /srv list of files and directories
+ 	if (strncmp(ptr, "private-srv ", 12) == 0) {
+ 		if (cfg.srv_private_keep) {
+@@ -1744,6 +1753,28 @@ void profile_read(const char *fname) {
+ 	fclose(fp);
+ }
+ 
++char *profile_list_slice(char *pos, char **ppos)
++{
++	/* Extract token from comma separated list.
++	 *
++	 * Input must be valid c-string, always returns valid c-string.
++	 *
++	 * If input is a normalized list, returned string is non-empty
++	 * unless parse position is already at the end of the list.
++	 */
++	char *beg = pos;
++	for (; *pos; ++pos) {
++		if (*pos == ',') {
++			*pos++ = 0;
++			break;
++		}
++	}
++	if (ppos)
++		*ppos = pos;
++	return beg;
++}
++
++
+ char *profile_list_normalize(char *list)
+ {
+ 	/* Remove redundant commas.
+diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
+index ff6be986..9116d88b 100644
+--- a/src/firejail/sandbox.c
++++ b/src/firejail/sandbox.c
+@@ -868,6 +868,82 @@ int sandbox(void* sandbox_arg) {
+ 	if (arg_private_dev)
+ 		fs_private_dev();
+ 
++	if (cfg.privileged_data_keep) {
++		struct stat st = {};
++		char *private_dir = 0;
++		if (asprintf(&private_dir, "%s/.local/share/system/privileged", cfg.homedir) < 0)
++			errExit("asprintf");
++
++		if (cfg.chrootdir) {
++			fwarning("privileged-data feature is disabled in chroot\n");
++		}
++		else if (arg_overlay) {
++			fwarning("privileged-data feature is disabled in overlay\n");
++		}
++		else if (euid_data.privileged_uid == INVALID_UID || euid_data.privileged_gid == INVALID_GID) {
++			fwarning("privileged-data feature is disabled - no \"privileged\" user\n");
++		}
++		else if (lstat(private_dir, &st) == -1) {
++			// config files should use mkdir to ensure the directory exist
++			fwarning("privileged-data feature is disabled - \"%s\" access: %m\n", private_dir);
++		}
++		else if (!S_ISDIR(st.st_mode)) {
++			fwarning("privileged-data feature is disabled - \"%s\" is not a dir\n", private_dir);
++		}
++		else if (chown(private_dir, euid_data.privileged_uid, euid_data.privileged_gid) == -1) {
++			fwarning("privileged-data feature is disabled - \"%s\" chown: %m\n", private_dir);
++		}
++		else {
++			/* Create empty privileged data dir */
++			if (1||arg_debug)
++				fprintf(stderr, "constructing %s: %s ...\n", RUN_PRIVILEGED_DIR, cfg.privileged_data_keep);
++			mkdir_attr(RUN_PRIVILEGED_DIR, 0770, euid_data.privileged_uid, euid_data.privileged_gid);
++			selinux_relabel_path(RUN_PRIVILEGED_DIR, private_dir);
++
++			/* Mount specified subdirectories */
++			char *work = strdup(cfg.privileged_data_keep);
++			char *pos = work;
++			char *ent;
++			while (*(ent = profile_list_slice(pos, &pos))) {
++				char *srce = 0;
++				if (asprintf(&srce, "%s/%s", private_dir, ent) < 0)
++					errExit("asprintf");
++				char *dest = 0;
++				if (asprintf(&dest, "%s/%s", RUN_PRIVILEGED_DIR, ent) < 0)
++					errExit("asprintf");
++				struct stat st = {};
++				if (lstat(srce, &st) == -1)
++					fprintf(stderr, "%s: could not stat: %m\n", srce);
++				else if (!S_ISDIR(st.st_mode))
++					fprintf(stderr, "%s: is not a directory\n", srce);
++				else if (mkdir(dest, st.st_mode & 0777) == -1)
++					fprintf(stderr, "%s: could not create: %m\n", dest);
++				else if (chown(dest, st.st_uid, st.st_gid) == -1)
++					fprintf(stderr, "%s: could not chown: %m\n", dest);
++				else if (mount(srce, dest, 0, MS_BIND, 0) < 0)
++					fprintf(stderr, "%s: could not mount: %m\n", srce);
++				else if (arg_debug)
++					fprintf(stderr, "%s: mounted at: %s\n", srce, dest);
++				free(dest);
++				free(srce);
++			}
++			free(work);
++
++			/* Mount constructed private data dir on top of the real thing */
++			if (1||arg_debug)
++				fprintf(stderr, "mounting %s @ %s\n", RUN_PRIVILEGED_DIR, private_dir);
++			if (mount(RUN_PRIVILEGED_DIR, private_dir, NULL, MS_BIND|MS_REC, NULL) < 0)
++				errExit("mount bind");
++
++			/* Then hide the construction site */
++			if (1||arg_debug)
++				fprintf(stderr, "hiding %s\n", RUN_PRIVILEGED_DIR);
++			if (mount("tmpfs", RUN_PRIVILEGED_DIR, "tmpfs", MS_NOSUID | MS_NODEV | MS_STRICTATIME, "mode=755,gid=0") < 0)
++				errExit("mounting tmpfs");
++		}
++		free(private_dir);
++	}
++
+ 	if (arg_private_opt) {
+ 		if (cfg.chrootdir)
+ 			fwarning("private-opt feature is disabled in chroot\n");
+diff --git a/src/firejail/usage.c b/src/firejail/usage.c
+index 190339f0..6974e5fa 100644
+--- a/src/firejail/usage.c
++++ b/src/firejail/usage.c
+@@ -186,6 +186,7 @@ static char *usage_str =
+ 	"    --private-cwd=directory - set working directory inside jail.\n"
+ 	"    --private-opt=file,directory - build a new /opt in a temporary filesystem.\n"
+ 	"    --private-srv=file,directory - build a new /srv in a temporary filesystem.\n"
++	"    --privileged-data=directory - whitelist privileged user data directory.\n"
+ 	"    --profile=filename|profile_name - use a custom profile.\n"
+ 	"    --profile.print=name|pid - print the name of profile file.\n"
+ 	"    --profile-path=directory - use this directory to look for profile files.\n"
+diff --git a/src/firejail/util.c b/src/firejail/util.c
+index 02befdc1..01e588ad 100644
+--- a/src/firejail/util.c
++++ b/src/firejail/util.c
+@@ -84,7 +84,7 @@ static void clean_supplementary_groups(gid_t gid) {
+ 	int i = 0;
+ 	while (allowed[i]) {
+ 		gid_t g = get_group_id(allowed[i]);
+-	 	if (g) {
++		if (g != -1) {
+ 			int j;
+ 			for (j = 0; j < ngroups; j++) {
+ 				if (g == groups[j]) {
+@@ -140,9 +140,9 @@ void drop_privs(int nogroups) {
+ 		clean_supplementary_groups(gid);
+ 
+ 	// set uid/gid
+-	if (setresgid(-1, getgid(), getgid()) != 0)
++	if (setresgid(euid_data.gid, euid_data.gid, euid_data.gid) == -1)
+ 		errExit("setresgid");
+-	if (setresuid(-1, getuid(), getuid()) != 0)
++	if (setresuid(euid_data.uid, euid_data.uid, euid_data.uid) == -1)
+ 		errExit("setresuid");
+ }
+ 
+@@ -736,6 +736,9 @@ void update_map(char *mapping, char *map_file) {
+ 		if (mapping[j] == ',')
+ 			mapping[j] = '\n';
+ 
++	if (arg_debug)
++		fprintf(stderr, "write %s:\n%s\n", map_file, mapping);
++
+ 	fd = open(map_file, O_RDWR);
+ 	if (fd == -1) {
+ 		fprintf(stderr, "Error: cannot open %s: %s\n", map_file, strerror(errno));
+@@ -875,16 +878,22 @@ uid_t pid_get_uid(pid_t pid) {
+ 
+ 
+ 
+-uid_t get_group_id(const char *group) {
+-	// find tty group id
+-	gid_t gid = 0;
++gid_t get_group_id(const char *group) {
++	gid_t gid = INVALID_GID;
+ 	struct group *g = getgrnam(group);
+ 	if (g)
+ 		gid = g->gr_gid;
+-
+ 	return gid;
+ }
+ 
++uid_t get_user_id(const char *user) {
++	uid_t uid = INVALID_UID;
++	struct passwd *pw = getpwnam(user);
++	if (pw)
++		uid = pw->pw_uid;
++	return uid;
++}
++
+ 
+ static int remove_callback(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
+ 	(void) sb;
+diff --git a/src/include/euid_common.h b/src/include/euid_common.h
+index 0dd1c162..f151aa94 100644
+--- a/src/include/euid_common.h
++++ b/src/include/euid_common.h
+@@ -24,36 +24,84 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <assert.h>
++#include <pwd.h>
++
++/* Sailfish OS uses privileged user/group file ownership
++ * to limit access to data with privacy implications and
++ * this must be taken into account during sandbox setup.
++ *
++ * If such user/group does not exist, all features related
++ * to privileged data should be automatically disabled.
++ */
++#define PRIVILEGED_USER  "privileged"
++#define PRIVILEGED_GROUP "privileged"
++
++#define INVALID_UID ((uid_t)(-1))
++#define INVALID_GID ((gid_t)(-1))
+ 
+ #define EUID_ASSERT() { \
+ 	if (getuid() != 0) \
+ 		assert(geteuid() != 0); \
+ }
+ 
+-extern uid_t firejail_uid;
+-extern uid_t firejail_gid;
++typedef struct {
++  uid_t uid;
++  gid_t gid;
++  gid_t primary_gid;
++  gid_t privileged_gid;
++  uid_t privileged_uid;
++} euid_data_t;
+ 
+-static inline void EUID_ROOT(void) {
+-	int rv = seteuid(0);
+-	rv |= setegid(0);
+-	(void) rv;
++#define EUID_DATA_INIT  {\
++    .uid            = 0,\
++    .gid            = 0,\
++    .primary_gid    = INVALID_GID,\
++    .privileged_gid = INVALID_GID,\
++    .privileged_uid = INVALID_UID,\
+ }
++extern euid_data_t euid_data;
++extern int arg_debug;
+ 
+-static inline void EUID_USER(void) {
+-	if (seteuid(firejail_uid) == -1)
+-		errExit("seteuid");
+-	if (setegid(firejail_gid) == -1)
+-		errExit("setegid");
+-}
++/* Implement as macros so that error reporting refers
++ * to call site instead of this header file ... */
++#define EUID_ROOT() do {\
++	if (seteuid(0) == -1)\
++		errExit("EUID_ROOT:seteuid(root)");\
++	if (setegid(0) == -1)\
++		errExit("EUID_ROOT:setegid(root)");\
++} while (0)
+ 
+-static inline void EUID_PRINT(void) {
+-	printf("debug: uid %d, euid %d\n", getuid(), geteuid());
+-	printf("debug: gid %d, egid %d\n", getgid(), getegid());
+-}
++#define EUID_USER() do {\
++	if (seteuid(euid_data.uid) == -1)\
++		errExit("EUID_USER:seteuid(user)");\
++	if (setegid(euid_data.gid) == -1)\
++		errExit("EUID_USER:setegid(user)");\
++} while (0)
++
++static inline void EUID_INIT(const char *progname) {
++	struct passwd *pw;
++
++	euid_data.uid = getuid();
++	euid_data.gid = getegid();
++
++	if ((pw = getpwuid(euid_data.uid))) {
++		if (euid_data.gid != pw->pw_gid)
++			euid_data.primary_gid = pw->pw_gid;
++	}
+ 
+-static inline void EUID_INIT(void) {
+-	firejail_uid = getuid();
+-	firejail_gid = getegid();
++	if ((pw = getpwnam(PRIVILEGED_USER))) {
++		euid_data.privileged_uid = pw->pw_uid;
++		euid_data.privileged_gid = pw->pw_gid;
++	}
++	if (arg_debug) {
++		fprintf(stderr, "%s: uid=%d gid=%d primary_gid=%d privileged_uid=%d privileged_gid=%d\n",
++			progname,
++			(int)euid_data.uid,
++			(int)euid_data.gid,
++			(int)euid_data.primary_gid,
++			(int)euid_data.privileged_uid,
++			(int)euid_data.privileged_gid);
++	}
+ }
+ 
+ #endif
+diff --git a/src/include/rundefs.h b/src/include/rundefs.h
+index 4da2db74..2a4e518e 100644
+--- a/src/include/rundefs.h
++++ b/src/include/rundefs.h
+@@ -45,6 +45,7 @@
+ #define RUN_ETC_DIR			RUN_MNT_DIR "/etc"
+ #define RUN_USR_ETC_DIR		RUN_MNT_DIR "/usretc"
+ #define RUN_OPT_DIR			RUN_MNT_DIR "/opt"
++#define RUN_PRIVILEGED_DIR		RUN_MNT_DIR "/privileged"
+ #define RUN_SRV_DIR			RUN_MNT_DIR "/srv"
+ #define RUN_BIN_DIR			RUN_MNT_DIR "/bin"
+ #define RUN_PULSE_DIR			RUN_MNT_DIR "/pulse"
+-- 
+2.17.1
+

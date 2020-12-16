@@ -12,6 +12,7 @@ Patch5:  0005-Add-missing-linefeeds-in-stderr-logging.patch
 Patch6:  0006-PATCH-Add-mkdir-and-mkfile-command-line-options-for-.patch
 Patch7:  0007-fcopy-Fix-memory-leaks.patch
 Patch8:  0008-Implement-SailfishOS-specific-privileged-data-.patch
+Patch9:  0009-sandbox-Do-not-leave-file-mounts-underneath-private-.patch
 
 URL: https://github.com/netblue30/firejail
 

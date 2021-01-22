@@ -1,0 +1,104 @@
+From 26aef1ecb6115905df26505ae8529448af6e6d57 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Tomi=20Lepp=C3=A4nen?= <tomi.leppanen@jolla.com>
+Date: Fri, 22 Jan 2021 17:29:20 +0200
+Subject: [PATCH] Add timestamp logging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Print timestamps when environment variable FIREJAIL_TIMESTAMPS=true is
+set. This is used to measure application launch time.
+
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
+---
+ src/firejail/firejail.h |  1 +
+ src/firejail/main.c     | 23 +++++++++++++++++++++++
+ src/firejail/sandbox.c  |  5 +++++
+ 3 files changed, 29 insertions(+)
+
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index f0c6319e..90e763da 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -367,6 +367,7 @@ extern char *fullargv[MAX_ARGS];
+ extern int fullargc;
+ 
+ // main.c
++void print_timestamp(const char *reason);
+ void check_user_namespace(void);
+ char *guess_shell(void);
+ 
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 150ee96f..b4572a44 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -303,6 +303,27 @@ static void check_network(Bridge *br) {
+ 	}
+ }
+ 
++static bool evaluates_to_true(const char *value)
++{
++    return strcmp(value, "true") == 0
++        || strcmp(value, "yes") == 0
++        || strcmp(value, "1") == 0;
++}
++
++void print_timestamp(const char *reason)
++{
++    static signed char print_timestamps = -1;
++    if (print_timestamps == -1) {
++        char* print = getenv("FIREJAIL_TIMESTAMPS");
++        print_timestamps = (print && evaluates_to_true(print)) ? 1 : 0;
++    }
++    if (print_timestamps == 1) {
++		struct timespec tp;
++		if (clock_gettime(CLOCK_REALTIME, &tp) == 0)
++			fprintf(stderr, "firejail: %s at %ld.%09ld\n", reason, tp.tv_sec, tp.tv_nsec);
++	}
++}
++
+ #ifdef HAVE_USERNS
+ void check_user_namespace(void) {
+ 	EUID_ASSERT();
+@@ -973,6 +994,8 @@ int main(int argc, char **argv, char **envp) {
+ 	int arg_caps_cmdline = 0; 	// caps requested on command line (used to break out of --chroot)
+ 	char **ptr;
+ 
++	print_timestamp("starting firejail");
++
+ 	// sanitize the umask
+ 	orig_umask = umask(022);
+ 
+diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
+index 1bb05a75..b6c6364b 100644
+--- a/src/firejail/sandbox.c
++++ b/src/firejail/sandbox.c
+@@ -536,6 +536,8 @@ void start_application(int no_sandbox, char *set_sandbox_status) {
+ 
+ 		if (set_sandbox_status)
+ 			*set_sandbox_status = SANDBOX_DONE;
++
++		print_timestamp("executing app");
+ 		execvp(cfg.original_argv[cfg.original_program_index], &cfg.original_argv[cfg.original_program_index]);
+ 	}
+ 	//****************************************
+@@ -590,6 +592,7 @@ void start_application(int no_sandbox, char *set_sandbox_status) {
+ 
+ 		if (set_sandbox_status)
+ 			*set_sandbox_status = SANDBOX_DONE;
++		print_timestamp("executing app");
+ 		execvp(arg[0], arg);
+ 	}
+ 
+@@ -1312,6 +1315,8 @@ int sandbox(void* sandbox_arg) {
+ 	if (cfg.cpus)
+ 		set_cpu_affinity();
+ 
++	print_timestamp("sandboxing done");
++
+ 	//****************************************
+ 	// fork the application and monitor it
+ 	//****************************************
+-- 
+2.29.2
+

@@ -1,7 +1,10 @@
-From e69a972458b4d520aa70d5134eadade1317041bf Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Fri, 9 Oct 2020 12:15:31 +0300
 Subject: [PATCH] Fix symlinks that go though /proc/self
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 When constructing sandbox fs, /etc/mtab which is symlink to
 /proc/self/mounts gets resolved as /proc/PID/mounts. Where
@@ -13,12 +16,13 @@ Use /proc/self/xxx type symlink target if it resolves similarly
 as the /proc/PID/xxx type would at the time of mapping.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
 ---
  src/fcopy/main.c | 43 ++++++++++++++++++++++++++++++++++++++++++-
  1 file changed, 42 insertions(+), 1 deletion(-)
 
 diff --git a/src/fcopy/main.c b/src/fcopy/main.c
-index 67237b4e..48e5fb48 100644
+index e65501d6..43790605 100644
 --- a/src/fcopy/main.c
 +++ b/src/fcopy/main.c
 @@ -172,6 +172,47 @@ static void mkdir_attr(const char *fname, mode_t mode, uid_t uid, gid_t gid) {
@@ -70,7 +74,7 @@ index 67237b4e..48e5fb48 100644
  void copy_link(const char *target, const char *linkpath, mode_t mode, uid_t uid, gid_t gid) {
  	(void) mode;
 @@ -183,7 +224,7 @@ void copy_link(const char *target, const char *linkpath, mode_t mode, uid_t uid,
- 	if (stat(linkpath, &s) == 0)
+ 	if (lstat(linkpath, &s) == 0)
  	       return;
  
 -	char *rp = realpath(target, NULL);
@@ -79,5 +83,5 @@ index 67237b4e..48e5fb48 100644
  		if (symlink(rp, linkpath) == -1) {
  			free(rp);
 -- 
-2.17.1
+2.29.2
 

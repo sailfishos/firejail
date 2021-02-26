@@ -1,19 +1,23 @@
-From 1130d1f519a99bd296642eeb4a07519e221777a2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Thu, 10 Dec 2020 13:55:25 +0200
 Subject: [PATCH] fcopy: Fix memory leaks
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 These have little consequences as the tool exits anyway,
 but fs_copydir() leaks memory on success path and check()
 on failure path.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
 ---
  src/fcopy/main.c | 13 ++++++-------
  1 file changed, 6 insertions(+), 7 deletions(-)
 
 diff --git a/src/fcopy/main.c b/src/fcopy/main.c
-index 48e5fb48..5f743297 100644
+index 43790605..6a51d363 100644
 --- a/src/fcopy/main.c
 +++ b/src/fcopy/main.c
 @@ -268,16 +268,14 @@ static int fs_copydir(const char *infname, const struct stat *st, int ftype, str
@@ -64,5 +68,5 @@ index 48e5fb48..5f743297 100644
  	exit(1);
  }
 -- 
-2.17.1
+2.29.2
 

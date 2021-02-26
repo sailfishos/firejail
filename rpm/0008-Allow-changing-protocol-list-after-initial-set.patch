@@ -1,7 +1,10 @@
-From 5fa8913298967857f49a30cee8e40b516b6aab21 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Fri, 6 Nov 2020 10:13:35 +0200
 Subject: [PATCH] Allow changing "protocol" list after initial set
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Firejail uses set-once logic for "protocol" list. This makes it
 impossible to accumulate list of allowed protocols from multiple
@@ -12,21 +15,22 @@ implicitly means protocols can be added/removed via any number of
 command line options / profile configuration files.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
 ---
  src/firejail/main.c    | 13 ++++---------
  src/firejail/profile.c | 13 ++++---------
  2 files changed, 8 insertions(+), 18 deletions(-)
 
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 5cc2d412..34e23e10 100644
+index 64964a9d..7510a042 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
-@@ -1269,15 +1269,10 @@ int main(int argc, char **argv, char **envp) {
+@@ -1277,15 +1277,10 @@ int main(int argc, char **argv, char **envp) {
  #endif
  		else if (strncmp(argv[i], "--protocol=", 11) == 0) {
  			if (checkcfg(CFG_SECCOMP)) {
 -				if (cfg.protocol) {
--					fwarning("two protocol lists are present, \"%s\" will be installed\n", cfg.protocol);
+-					fwarning("more than one protocol list is present, \"%s\" will be installed\n", cfg.protocol);
 -				}
 -				else {
 -					// store list
@@ -42,15 +46,15 @@ index 5cc2d412..34e23e10 100644
  			else
  				exit_err_feature("seccomp");
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index 9bc08b80..d623f417 100644
+index 456fc009..86154a1b 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -892,15 +892,10 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
+@@ -911,15 +911,10 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
  
  	if (strncmp(ptr, "protocol ", 9) == 0) {
  		if (checkcfg(CFG_SECCOMP)) {
 -			if (cfg.protocol) {
--				fwarning("two protocol lists are present, \"%s\" will be installed\n", cfg.protocol);
+-				fwarning("more than one protocol list is present, \"%s\" will be installed\n", cfg.protocol);
 -				return 0;
 -			}
 -
@@ -66,5 +70,5 @@ index 9bc08b80..d623f417 100644
  		else
  			warning_feature_disabled("seccomp");
 -- 
-2.17.1
+2.29.2
 

@@ -1,7 +1,10 @@
-From 3565dae1c9ee1bc77a0472880fcb3773943e3d32 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Thu, 5 Nov 2020 18:52:29 +0200
-Subject: [PATCH] Add utility functions for handing comma separated lists
+Subject: [PATCH] Add utility functions for handling comma separated lists
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 A lot of profile options deal with manipulating strings containing
 comma separated list of things, using several strains of similar but
@@ -13,13 +16,14 @@ make higher level logic shorter, cleaner and function in more uniform
 manner.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
 ---
  src/firejail/firejail.h |   3 +
- src/firejail/profile.c  | 136 ++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 139 insertions(+)
+ src/firejail/profile.c  | 140 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 143 insertions(+)
 
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index 2bb8dd35..b8bdae88 100644
+index 1b979089..bbb555df 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
 @@ -449,6 +449,9 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
@@ -33,10 +37,10 @@ index 2bb8dd35..b8bdae88 100644
  // list.c
  void list(void);
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index 8c29fe81..9bc08b80 100644
+index 1ee8cdfc..456fc009 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1748,3 +1748,139 @@ void profile_read(const char *fname) {
+@@ -1774,3 +1774,143 @@ void profile_read(const char *fname) {
  	}
  	fclose(fp);
  }
@@ -68,6 +72,8 @@ index 8c29fe81..9bc08b80 100644
 +
 +char *profile_list_compress(char *list)
 +{
++	size_t i;
++
 +	/* Comma separated list is processed so that:
 +	 * "item"  -> adds item to list
 +	 * "-item" -> removes item from list
@@ -87,7 +93,7 @@ index 8c29fe81..9bc08b80 100644
 +
 +	/* Count items: comma count + 1 */
 +	size_t count = 1;
-+	for (size_t i=0; list[i]; ++i) {
++	for (i = 0; list[i]; ++i) {
 +		if (list[i] == ',')
 +			++count;
 +	}
@@ -96,7 +102,7 @@ index 8c29fe81..9bc08b80 100644
 +	char *in[count];
 +	count = 0;
 +	in[count++] = list;
-+	for (size_t i=0; list[i]; ++i) {
++	for (i = 0; list[i]; ++i) {
 +		if (list[i] != ',')
 +			continue;
 +		list[i] = 0;
@@ -104,16 +110,18 @@ index 8c29fe81..9bc08b80 100644
 +	}
 +
 +	/* Filter array: add, remove, reset, filter out duplicates */
-+	for (size_t i = 0; i < count; ++i) {
++	for (i = 0; i < count; ++i) {
 +		char *item = in[i];
++		assert(item);
 +
++		size_t k;
 +		switch (*item) {
 +		case '-':
 +			++item;
 +			/* Do not include this item */
 +			in[i] = 0;
 +			/* Remove if already included */
-+			for (size_t k = 0; k < i; ++k) {
++			for (k = 0; k < i; ++k) {
 +				if (in[k] && !strcmp(in[k], item)) {
 +					in[k] = 0;
 +					break;
@@ -131,7 +139,7 @@ index 8c29fe81..9bc08b80 100644
 +				break;
 +			}
 +			/* Include item unless it is already included */
-+			for (size_t k = 0; k < i; ++k) {
++			for (k = 0; k < i; ++k) {
 +				if (in[k] && !strcmp(in[k], item)) {
 +					in[i] = 0;
 +					break;
@@ -144,7 +152,7 @@ index 8c29fe81..9bc08b80 100644
 +			if (!*item)
 +				in[i] = 0;
 +			/* Remove all allready included items */
-+			for (size_t k = 0; k < i; ++k)
++			for (k = 0; k < i; ++k)
 +				in[k] = 0;
 +			break;
 +		}
@@ -155,7 +163,7 @@ index 8c29fe81..9bc08b80 100644
 +	 * than what it used to be.
 +	 */
 +	char *pos = list;
-+	for (size_t i = 0; i < count; ++i) {
++	for (i = 0; i < count; ++i) {
 +		char *item = in[i];
 +		if (!item)
 +			continue;
@@ -177,5 +185,5 @@ index 8c29fe81..9bc08b80 100644
 +	*list = profile_list_compress(tmp);
 +}
 -- 
-2.17.1
+2.29.2
 

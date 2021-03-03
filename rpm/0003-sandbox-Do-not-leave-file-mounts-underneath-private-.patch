@@ -1,7 +1,10 @@
-From 89e853daac52a4aea24c7bc8bc7671597a79632c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Wed, 16 Dec 2020 11:18:03 +0200
 Subject: [PATCH] sandbox: Do not leave file mounts underneath private-etc
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Firejail uses file bind-mounts to filter /etc/passwd and /etc/group
 content. If private-etc is used, these mounts are left underneath
@@ -15,6 +18,7 @@ separate phases.
 Undo the file mounts in /etc before mounting private-etc content.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
 ---
  src/firejail/firejail.h |  2 ++
  src/firejail/fs_etc.c   |  9 ++++++++-
@@ -22,10 +26,10 @@ Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
  3 files changed, 33 insertions(+), 3 deletions(-)
 
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index bcfe61c2..f0c6319e 100644
+index 9ea3edcd..1b979089 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
-@@ -654,6 +654,8 @@ void network_set_run_file(pid_t pid);
+@@ -647,6 +647,8 @@ void network_set_run_file(pid_t pid);
  
  // fs_etc.c
  void fs_machineid(void);
@@ -67,10 +71,10 @@ index 271e4685..908134ef 100644
 +	fs_private_dir_mount(private_dir, private_run_dir);
 +}
 diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
-index 9116d88b..1bb05a75 100644
+index d811fe45..4f5fe368 100644
 --- a/src/firejail/sandbox.c
 +++ b/src/firejail/sandbox.c
-@@ -1053,8 +1053,29 @@ int sandbox(void* sandbox_arg) {
+@@ -970,8 +970,29 @@ int sandbox(void* sandbox_arg) {
  		else if (arg_overlay)
  			fwarning("private-etc feature is disabled in overlay\n");
  		else {
@@ -78,7 +82,7 @@ index 9116d88b..1bb05a75 100644
 -			fs_private_dir_list("/usr/etc", RUN_USR_ETC_DIR, cfg.etc_private_keep); // openSUSE
 +			/* Current /etc/passwd and /etc/group files are bind
 +			 * mounted filtered versions of originals. Leaving
-+			 * them underneath privete-etc mount causes problems
++			 * them underneath private-etc mount causes problems
 +			 * in devices with older kernels, e.g. attempts to
 +			 * update the real /etc/passwd file yield EBUSY.
 +			 *
@@ -103,5 +107,5 @@ index 9116d88b..1bb05a75 100644
  			if (need_preload)
  				fs_trace_preload();
 -- 
-2.17.1
+2.29.2
 

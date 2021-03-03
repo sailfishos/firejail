@@ -1,4 +1,4 @@
-From e2bd14f8a6a6d8eab07b84c36c32b99cd5c8d28a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Thu, 26 Nov 2020 19:29:29 +0200
 Subject: [PATCH] Implement Sailfish OS specific privileged-data option
@@ -31,18 +31,18 @@ get_user_id() function.
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
 ---
  src/firejail/firejail.h   |   5 +-
- src/firejail/macros.c     |   9 ++++
- src/firejail/main.c       | 107 ++++++++++++++++++++++----------------
+ src/firejail/macros.c     |   9 +++
+ src/firejail/main.c       | 112 +++++++++++++++++++++-----------------
  src/firejail/profile.c    |  31 +++++++++++
- src/firejail/sandbox.c    |  76 +++++++++++++++++++++++++++
+ src/firejail/sandbox.c    |  76 ++++++++++++++++++++++++++
  src/firejail/usage.c      |   1 +
  src/firejail/util.c       |  23 +++++---
- src/include/euid_common.h |  86 +++++++++++++++++++++++-------
+ src/include/euid_common.h |  86 ++++++++++++++++++++++-------
  src/include/rundefs.h     |   1 +
- 9 files changed, 266 insertions(+), 73 deletions(-)
+ 9 files changed, 266 insertions(+), 78 deletions(-)
 
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index b8bdae88..bcfe61c2 100644
+index bbb555df..e4eebe62 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
 @@ -156,6 +156,7 @@ typedef struct config_t {
@@ -61,9 +61,9 @@ index b8bdae88..bcfe61c2 100644
  char *profile_list_normalize(char *list);
  char *profile_list_compress(char *list);
  void profile_list_augment(char **list, const char *items);
-@@ -518,7 +520,8 @@ void wait_for_other(int fd);
+@@ -517,7 +519,8 @@ void update_map(char *mapping, char *map_file);
+ void wait_for_other(int fd);
  void notify_other(int fd);
- const char *gnu_basename(const char *path);
  uid_t pid_get_uid(pid_t pid);
 -uid_t get_group_id(const char *group);
 +gid_t get_group_id(const char *group);
@@ -99,7 +99,7 @@ index 2623d794..8c3635b0 100644
  		int id = macro_id(fname);
  		if (id != -1)
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index d52d53c9..150ee96f 100644
+index 7510a042..4a367d7e 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
 @@ -53,8 +53,7 @@ int __clone2(int (*fn)(void *),
@@ -112,7 +112,7 @@ index d52d53c9..150ee96f 100644
  
  #define STACK_SIZE (1024 * 1024)
  #define STACK_ALIGNMENT 16
-@@ -981,7 +980,7 @@ int main(int argc, char **argv, char **envp) {
+@@ -982,7 +981,7 @@ int main(int argc, char **argv, char **envp) {
  	fix_std_streams();
  
  	// drop permissions by default and rise them when required
@@ -121,7 +121,7 @@ index d52d53c9..150ee96f 100644
  	EUID_USER();
  
  	// argument count should be larger than 0
-@@ -1957,6 +1956,12 @@ int main(int argc, char **argv, char **envp) {
+@@ -1965,6 +1964,12 @@ int main(int argc, char **argv, char **envp) {
  				cfg.opt_private_keep = argv[i] + 14;
  			arg_private_opt = 1;
  		}
@@ -134,7 +134,7 @@ index d52d53c9..150ee96f 100644
  		else if (strncmp(argv[i], "--private-srv=", 14) == 0) {
  			// extract private srv list
  			if (*(argv[i] + 14) == '\0') {
-@@ -2994,64 +2999,74 @@ int main(int argc, char **argv, char **envp) {
+@@ -3011,71 +3016,76 @@ int main(int argc, char **argv, char **envp) {
  
   	if (arg_noroot) {
  	 	// update the UID and GID maps in the new child user namespace
@@ -142,10 +142,6 @@ index d52d53c9..150ee96f 100644
 -	 	char *map_path;
 -	 	if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
 -	 		errExit("asprintf");
- 
--	 	char *map;
--	 	uid_t uid = getuid();
--	 	if (asprintf(&map, "%d %d 1", uid, uid) == -1)
 +		/* NB: In Linux 4.14 and earlier, id mapping data can have at
 +		 *     maximum 5 lines - see user_namespaces (7) for details. */
 +		const int id_max = 5;
@@ -170,7 +166,10 @@ index d52d53c9..150ee96f 100644
 +				}
 +			}
 +		}
-+
+ 
+-	 	char *map;
+-	 	uid_t uid = getuid();
+-	 	if (asprintf(&map, "%d %d 1", uid, uid) == -1)
 +		auto char *id_map(void) {
 +			char *ptr = map_data;
 +			for (int i = 0; i < id_cnt; ++i) {
@@ -208,14 +207,22 @@ index d52d53c9..150ee96f 100644
 -	 	gid_t gid = getgid();
 -	 	sprintf(ptr, "%d %d 1\n", gid, gid);
 -	 	ptr += strlen(ptr);
--
+ 
 +		id_add(0);
 +		id_add(euid_data.gid);
 +		id_add(euid_data.primary_gid);
 +		id_add(euid_data.privileged_gid);
  	 	if (!arg_nogroups) {
+ 		 	//  add firejail group
+-		 	gid_t g = get_group_id("firejail");
+-		 	if (g) {
+-		 		sprintf(ptr, "%d %d 1\n", g, g);
+-		 		ptr += strlen(ptr);
+-		 	}
+-
++			id_add(get_group_id("firejail"));
  		 	//  add tty group
--		 	gid_t g = get_group_id("tty");
+-		 	g = get_group_id("tty");
 -		 	if (g) {
 -		 		sprintf(ptr, "%d %d 1\n", g, g);
 -		 		ptr += strlen(ptr);
@@ -253,10 +260,10 @@ index d52d53c9..150ee96f 100644
  	 	free(map_path);
   	}
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index d623f417..aaf185ae 100644
+index 86154a1b..c57d8d26 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1269,6 +1269,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
+@@ -1289,6 +1289,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
  		return 0;
  	}
  
@@ -272,7 +279,7 @@ index d623f417..aaf185ae 100644
  	// private /srv list of files and directories
  	if (strncmp(ptr, "private-srv ", 12) == 0) {
  		if (cfg.srv_private_keep) {
-@@ -1744,6 +1753,28 @@ void profile_read(const char *fname) {
+@@ -1770,6 +1779,28 @@ void profile_read(const char *fname) {
  	fclose(fp);
  }
  
@@ -302,10 +309,10 @@ index d623f417..aaf185ae 100644
  {
  	/* Remove redundant commas.
 diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
-index ff6be986..9116d88b 100644
+index 4f5fe368..834882ad 100644
 --- a/src/firejail/sandbox.c
 +++ b/src/firejail/sandbox.c
-@@ -868,6 +868,82 @@ int sandbox(void* sandbox_arg) {
+@@ -862,6 +862,82 @@ int sandbox(void* sandbox_arg) {
  	if (arg_private_dev)
  		fs_private_dev();
  
@@ -401,10 +408,10 @@ index 190339f0..6974e5fa 100644
  	"    --profile.print=name|pid - print the name of profile file.\n"
  	"    --profile-path=directory - use this directory to look for profile files.\n"
 diff --git a/src/firejail/util.c b/src/firejail/util.c
-index 02befdc1..01e588ad 100644
+index 911c8bd9..c9d9285b 100644
 --- a/src/firejail/util.c
 +++ b/src/firejail/util.c
-@@ -84,7 +84,7 @@ static void clean_supplementary_groups(gid_t gid) {
+@@ -90,7 +90,7 @@ static void clean_supplementary_groups(gid_t gid) {
  	int i = 0;
  	while (allowed[i]) {
  		gid_t g = get_group_id(allowed[i]);
@@ -413,7 +420,7 @@ index 02befdc1..01e588ad 100644
  			int j;
  			for (j = 0; j < ngroups; j++) {
  				if (g == groups[j]) {
-@@ -140,9 +140,9 @@ void drop_privs(int nogroups) {
+@@ -146,9 +146,9 @@ void drop_privs(int nogroups) {
  		clean_supplementary_groups(gid);
  
  	// set uid/gid
@@ -425,7 +432,7 @@ index 02befdc1..01e588ad 100644
  		errExit("setresuid");
  }
  
-@@ -736,6 +736,9 @@ void update_map(char *mapping, char *map_file) {
+@@ -733,6 +733,9 @@ void update_map(char *mapping, char *map_file) {
  		if (mapping[j] == ',')
  			mapping[j] = '\n';
  
@@ -435,7 +442,7 @@ index 02befdc1..01e588ad 100644
  	fd = open(map_file, O_RDWR);
  	if (fd == -1) {
  		fprintf(stderr, "Error: cannot open %s: %s\n", map_file, strerror(errno));
-@@ -875,16 +878,22 @@ uid_t pid_get_uid(pid_t pid) {
+@@ -858,16 +861,22 @@ uid_t pid_get_uid(pid_t pid) {
  
  
  
@@ -571,7 +578,7 @@ index 0dd1c162..f151aa94 100644
  
  #endif
 diff --git a/src/include/rundefs.h b/src/include/rundefs.h
-index 4da2db74..2a4e518e 100644
+index 21aad66f..595c245a 100644
 --- a/src/include/rundefs.h
 +++ b/src/include/rundefs.h
 @@ -45,6 +45,7 @@
@@ -583,5 +590,5 @@ index 4da2db74..2a4e518e 100644
  #define RUN_BIN_DIR			RUN_MNT_DIR "/bin"
  #define RUN_PULSE_DIR			RUN_MNT_DIR "/pulse"
 -- 
-2.17.1
+2.29.2
 

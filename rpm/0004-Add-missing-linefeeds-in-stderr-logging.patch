@@ -1,11 +1,15 @@
-From c12ab15258d6e7e0c5e0ff65089f2b7875c6b98b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Thu, 12 Nov 2020 16:04:53 +0200
 Subject: [PATCH] Add missing linefeeds in stderr logging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Lacking linefeed chars cause messages to get concatenated.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+Signed-off-by: Tomi Leppänen <tomi.leppanen@jolla.com>
 ---
  src/firejail/fs_mkdir.c     | 4 ++--
  src/firejail/main.c         | 2 +-
@@ -35,10 +39,10 @@ index 0e213f2f..db2b388a 100644
  		}
  
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 34e23e10..cfd68cf4 100644
+index 0f0086a6..f5fd57ba 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
-@@ -298,7 +298,7 @@ static void check_network(Bridge *br) {
+@@ -297,7 +297,7 @@ static void check_network(Bridge *br) {
  	else if (br->ipsandbox) { // for macvlan check network range
  		char *rv = in_netrange(br->ipsandbox, br->ip, br->mask);
  		if (rv) {
@@ -61,5 +65,5 @@ index 85896e52..9751ea19 100644
  		}
  		// send an ARP request and check if there is anybody on this IP address
 -- 
-2.17.1
+2.29.2
 

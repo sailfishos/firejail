@@ -24,6 +24,13 @@ Firejail is a SUID sandbox program that reduces the risk of security
 breaches by restricting the running environment of untrusted applications
 using Linux namespaces.
 
+%package profiles
+Summary: %{name} profiles
+Requires: %{name} = %{version}-%{release}
+
+%description profiles
+%{summary} and firecfg tool.
+
 %package doc
 Summary: Documentation for %{name}
 Requires: %{name} = %{version}-%{release}
@@ -49,12 +56,23 @@ rm -rf %{buildroot}%{_datadir}/bash-completion
 %files
 %license COPYING
 %defattr(-,root,root,-)
-%attr(4755, -, -) %{_bindir}/firejail
-%{_bindir}/firecfg
+%attr(4755, -, -) %{_bindir}/%{name}
 %{_bindir}/firemon
-%{_libdir}/firejail
-%config %{_sysconfdir}/firejail
+%exclude %{_libdir}/%{name}/firecfg.config
+%{_libdir}/%{name}
+%dir %{_sysconfdir}/%{name}
+%config %{_sysconfdir}/%{name}/*.config
+%{_sysconfdir}/%{name}/disable-*.inc
+%{_sysconfdir}/%{name}/whitelist-*.inc
+
+%files profiles
+%{_bindir}/firecfg
+%{_libdir}/%{name}/firecfg.config
+%exclude %{_sysconfdir}/%{name}/*.config
+%exclude %{_sysconfdir}/%{name}/disable-*.inc
+%exclude %{_sysconfdir}/%{name}/whitelist-*.inc
+%{_sysconfdir}/%{name}
 
 %files doc
 %defattr(-,root,root,-)
-%{_docdir}/firejail
+%{_docdir}/%{name}

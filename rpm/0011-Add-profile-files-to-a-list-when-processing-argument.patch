@@ -1,0 +1,159 @@
+From 11b8108544b4a0d535ce4bb7c6c098b8d6070f88 Mon Sep 17 00:00:00 2001
+From: Jussi Laakkonen <jussi.laakkonen@jolla.com>
+Date: Mon, 17 May 2021 17:33:30 +0300
+Subject: [PATCH] Add profile files to a list when processing arguments
+
+Do not read the profile files when processing arguments. Instead prepend
+them to a list that is processed after the arguments are processed in
+order to be able to replace all template keys in the profile file lines.
+The list is reversed before processing to have the profile files read in
+the given order. Each item in the list is free'd after it has been
+processed.
+---
+ src/firejail/firejail.h |  1 +
+ src/firejail/main.c     |  3 ++
+ src/firejail/profile.c  | 81 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 85 insertions(+)
+
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index e4eebe62..5ac874e0 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -454,6 +454,7 @@ char *profile_list_slice(char *pos, char **ppos);
+ char *profile_list_normalize(char *list);
+ char *profile_list_compress(char *list);
+ void profile_list_augment(char **list, const char *items);
++void profile_read_file_list();
+ 
+ // list.c
+ void list(void);
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 4a367d7e..88b99de7 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -2732,6 +2732,9 @@ int main(int argc, char **argv, char **envp) {
+ 			break;
+ 		}
+ 	}
++
++	profile_read_file_list();
++
+ 	EUID_ASSERT();
+ 
+ 	// exit chroot, overlay and appimage sandboxes when caps are explicitly specified on command line
+diff --git a/src/firejail/profile.c b/src/firejail/profile.c
+index c57d8d26..9de72826 100644
+--- a/src/firejail/profile.c
++++ b/src/firejail/profile.c
+@@ -26,6 +26,18 @@ extern char *xephyr_screen;
+ 
+ #define MAX_READ 8192				  // line buffer for profile files
+ 
++typedef struct profile_file_name_t {
++	char *fname;
++	struct profile_file_name_t *next;
++} ProfileFileName;
++
++// This is initially set to make profile_read() to add the profile filename
++// to a list of profiles that are to be read after arguments have been
++// processed and templates are set in order to replace any template key
++// existing in the profile lines.
++static int read_profiles = 0;
++static ProfileFileName *profile_file_name_list = NULL;
++
+ // find and read the profile specified by name from dir directory
+ // return  1 if a profile was found
+ static int profile_find(const char *name, const char *dir, int add_ext) {
+@@ -1643,6 +1655,27 @@ void profile_add(char *str) {
+ 	ptr->next = prf;
+ }
+ 
++// Prepends entries to profile_file_name_list for later reading of the files
++// List is reversed when the file list is processed to provide correct order
++void add_to_profile_file_name_list(const char *fname)
++{
++	ProfileFileName *pfn;
++
++	if (!fname || !*fname)
++		return;
++
++	if (arg_debug)
++		printf("Add profile \"%s\" to list\n", fname);
++
++	pfn = malloc(sizeof(ProfileFileName));
++	if (!pfn)
++		errExit("malloc");
++
++	pfn->fname = strdup(fname);
++	pfn->next = profile_file_name_list;
++	profile_file_name_list = pfn;
++}
++
+ // read a profile file
+ static int include_level = 0;
+ void profile_read(const char *fname) {
+@@ -1691,6 +1724,11 @@ void profile_read(const char *fname) {
+ 		}
+ 	}
+ 
++	if (!read_profiles) {
++		add_to_profile_file_name_list(fname);
++		return;
++	}
++
+ 	// open profile file:
+ 	FILE *fp = fopen(fname, "r");
+ 	if (fp == NULL) {
+@@ -1779,6 +1817,49 @@ void profile_read(const char *fname) {
+ 	fclose(fp);
+ }
+ 
++static ProfileFileName *reverse_read_file_list(ProfileFileName *head)
++{
++	ProfileFileName *curr = head;
++	ProfileFileName *prev = NULL;
++	ProfileFileName *next = NULL;
++
++	while (curr) {
++		next = curr->next;
++		curr->next = prev;
++		prev = curr;
++		curr = next;
++	}
++
++	return prev;
++}
++
++void profile_read_file_list()
++{
++	ProfileFileName *iter;
++	ProfileFileName *temp;
++
++	read_profiles = 1;
++
++	// Profile files are prepended to the list, reverse the list to
++	// read profile files in given order. Get the beginning of the
++	// reverse list and free each element as they are processed.
++	iter = reverse_read_file_list(profile_file_name_list);
++	while (iter) {
++		if (arg_debug)
++			printf("Read profile \"%s\"\n", iter->fname);
++
++		profile_read(iter->fname);
++
++		temp = iter;
++		iter = iter->next;
++
++		free(temp->fname);
++		free(temp);
++	}
++
++	profile_file_name_list = NULL;
++}
++
+ char *profile_list_slice(char *pos, char **ppos)
+ {
+ 	/* Extract token from comma separated list.
+-- 
+2.20.1
+

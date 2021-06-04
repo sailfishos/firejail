@@ -1,0 +1,782 @@
+From 87906fc34da4ea95e6bab1c881a44bd24e7a433c Mon Sep 17 00:00:00 2001
+From: Jussi Laakkonen <jussi.laakkonen@jolla.com>
+Date: Fri, 7 May 2021 18:29:29 +0300
+Subject: [PATCH] Implement template addition for replacing keys in profile
+ files
+
+Implement template addition to pass templates as key value pairs as cmd
+line parameters to replace the keys in read profile file lines to allow
+more customization and flexibility. This adds a new file called
+template.c which contains all the functionality.
+
+Motivation for this is to have the possibility to create profile files
+where a specific key exists that can be customized per application that
+is being run with firejail. For example, application name can be used in
+a D-Bus name that is requested to be owned to avoid collision with other
+applications requiring the same base name. This can be passed directly
+then to firejail as a cmd line parameter when starting the application.
+
+All templates are to be given via cmd line parameters in format:
+ --template=KEY:VALUE
+
+The keys and values are stored in a single linked list within template.c,
+which is free'd when the keys in all read profile file (including
+included profiles) lines have been replaced.
+
+Each key can exist only once, existing hardcoded macros cannot be
+overwritten. If any of these is violated firejail exits. A template key
+cannot start with a digit and must contain alphanumeric chars only.
+
+Each value must conform to following rules:
+ - length is < 255 (D-Bus name length)
+ - can contain alphabetical (a-zA-Z), integer (0-9) and '_-/.' chars but
+   no '..'
+
+In order to use the same DBUS_MAX_NAME_LENGTH it is moved from dbus.c to
+firejail.h.
+
+When processing the profile file lines the template keys are expected to
+be written as other macros, ${TEMPLATE_KEY}. Template cannot be in the
+beginning of the line. If the read line contains other internal macros
+they are not replaced as they are processed later with more strict and
+specific checks. It is known that using strtok_r() and doing the
+tokenization in two steps, first by '$' and then by '{}' invalid
+definitions such as ${{TEMPLATE_KEY2}} will pass the checks. The process
+of replacing the keys can be described as follows to ease the
+understanding of the code:
+
+1. "whitelist ${HOME}/${key1}/path/to/${key2}.somewhere" tokens are:
+    a: whitelist
+    b: {HOME}/
+    c: {key1}/path/to/
+    d: {key2}.somewhere
+2. Keys in the first token 'a' are ignored, it is the start of new str
+3. Tokens 'b', 'c' and 'd' are passed to process_key_value
+4. Each of the template keys are replaced with corresponding values, as
+${HOME} is internal macro it is not replaced but added as is. Only the
+first items in tokens, 'key1' and 'key2' are considered as proper keys to
+have the values replaced, the remains are just added to the str.
+5. Resulting string would be then:
+   "whitelist ${HOME}/value1/path/to/value2.somewhere"
+
+In order to avoid unnecessary duplication of each read profile line the
+line is first checked to have at least one template key. If the template
+key is not found firejail will exit with an error.
+
+Man pages for firejail and firejail-profile are updated to include this
+addition.
+---
+ src/firejail/dbus.c          |   4 +-
+ src/firejail/firejail.h      |   8 +
+ src/firejail/main.c          |  11 +
+ src/firejail/profile.c       |  34 +++
+ src/firejail/template.c      | 504 +++++++++++++++++++++++++++++++++++
+ src/firejail/usage.c         |   1 +
+ src/man/firejail-profile.txt |  14 +
+ src/man/firejail.txt         |  17 ++
+ 8 files changed, 591 insertions(+), 2 deletions(-)
+ create mode 100644 src/firejail/template.c
+
+diff --git a/src/firejail/dbus.c b/src/firejail/dbus.c
+index 3cf75ed8..8b5e52f4 100644
+--- a/src/firejail/dbus.c
++++ b/src/firejail/dbus.c
+@@ -41,7 +41,7 @@
+ #define DBUS_USER_DIR_FORMAT RUN_FIREJAIL_DBUS_DIR "/%d"
+ #define DBUS_USER_PROXY_SOCKET_FORMAT DBUS_USER_DIR_FORMAT "/%d-user"
+ #define DBUS_SYSTEM_PROXY_SOCKET_FORMAT DBUS_USER_DIR_FORMAT "/%d-system"
+-#define DBUS_MAX_NAME_LENGTH 255
++// moved to firejail.h - #define DBUS_MAX_NAME_LENGTH 255
+ // moved to include/common.h - #define XDG_DBUS_PROXY_PATH "/usr/bin/xdg-dbus-proxy"
+ 
+ static pid_t dbus_proxy_pid = 0;
+@@ -561,4 +561,4 @@ void dbus_apply_policy(void) {
+ 
+ 	fwarning("An abstract unix socket for session D-BUS might still be available. Use --net or remove unix from --protocol set.\n");
+ }
+-#endif // HAVE_DBUSPROXY
+\ No newline at end of file
++#endif // HAVE_DBUSPROXY
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index 5ac874e0..fdf49873 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -863,6 +863,8 @@ void set_x11_run_file(pid_t pid, int display);
+ void set_profile_run_file(pid_t pid, const char *fname);
+ 
+ // dbus.c
++#define DBUS_MAX_NAME_LENGTH 255
++
+ int dbus_check_name(const char *name);
+ int dbus_check_call_rule(const char *name);
+ void dbus_check_profile(void);
+@@ -881,4 +883,10 @@ void dhcp_start(void);
+ // selinux.c
+ void selinux_relabel_path(const char *path, const char *inside_path);
+ 
++// template.c
++void check_template(char *arg);
++int template_requires_expansion(char *arg);
++char *template_replace_keys(char *arg);
++void template_print_all();
++void template_cleanup();
+ #endif
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 88b99de7..e02e96c4 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -2598,6 +2598,11 @@ int main(int argc, char **argv, char **envp) {
+ 				exit_err_feature("networking");
+ 		}
+ #endif
++		else if (strncmp(argv[i], "--template=", 11) == 0) {
++			char *arg = strdup(argv[i] + 11); // Parse key in check_template()
++			check_template(arg);
++			free(arg);
++		}
+ 		//*************************************
+ 		// command
+ 		//*************************************
+@@ -2733,6 +2738,9 @@ int main(int argc, char **argv, char **envp) {
+ 		}
+ 	}
+ 
++	// Prints templates only if arg_debug is set
++	template_print_all();
++
+ 	profile_read_file_list();
+ 
+ 	EUID_ASSERT();
+@@ -2852,6 +2860,9 @@ int main(int argc, char **argv, char **envp) {
+ 	}
+ 	EUID_ASSERT();
+ 
++	// Templates are no longer needed as profile files are read
++	template_cleanup();
++
+ 	// block X11 sockets
+ 	if (arg_x11_block)
+ 		x11_block();
+diff --git a/src/firejail/profile.c b/src/firejail/profile.c
+index 9de72826..9cd53833 100644
+--- a/src/firejail/profile.c
++++ b/src/firejail/profile.c
+@@ -1773,6 +1773,40 @@ void profile_read(const char *fname) {
+ 			msg_printed = 1;
+ 		}
+ 
++		// Replace all template keys on line if at least one non-
++		// hardcoded or not internally used is found. Since templates
++		// can be used anywhere process the keys before include.
++		char *ptr_expanded;
++
++		switch (template_requires_expansion(ptr)) {
++		case -EINVAL:
++			fprintf(stderr, "Ignoring line \"%s\", as it "
++					"contains invalid template keys\n",
++					ptr);
++			free(ptr);
++			continue;
++		case 0:
++			break;
++		case 1:
++			ptr_expanded = template_replace_keys(ptr);
++			if (ptr_expanded == NULL) {
++				fprintf(stderr, "Ignoring line \"%s\"\n", ptr);
++				free(ptr);
++				continue;
++			}
++
++			if (arg_debug)
++				printf("template keys expanded: \"%s\"\n",
++								ptr_expanded);
++
++			free(ptr);
++			ptr = ptr_expanded;
++
++			break;
++		default:
++			break;
++		}
++
+ 		// process include
+ 		if (strncmp(ptr, "include ", 8) == 0 && !is_in_ignore_list(ptr)) {
+ 			include_level++;
+diff --git a/src/firejail/template.c b/src/firejail/template.c
+new file mode 100644
+index 00000000..64bcef5e
+--- /dev/null
++++ b/src/firejail/template.c
+@@ -0,0 +1,504 @@
++/*
++ * Copyright (C) 2021 Jolla Ltd.
++ * Copyright (C) 2021 Open Mobile Platform
++ *
++ * This file is part of firejail project
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include "firejail.h"
++#include <stdlib.h>
++#include <string.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <errno.h>
++
++#define TEMPLATE_KEY_VALUE_DELIM ":"
++#define TEMPLATE_KEY_MACRO_DELIM "$"
++#define TEMPLATE_KEY_MACRO_SUB_DELIMS "{}"
++#define TEMPLATE_STR_COMPAT_CHARS "_-/."
++
++typedef struct template_t {
++	char *key;
++	char *value;
++	struct template_t *next;
++} Template;
++
++typedef enum {
++	STR_CHECK_ALNUM = 0,
++	STR_CHECK_COMPAT
++} StrCheckType;
++
++Template *tmpl_list = NULL;
++
++static Template *template_new(const char *key, const char *value)
++{
++	Template *tmpl;
++
++	if (!key || !*key || !value || !*value)
++		return NULL;
++
++	tmpl = malloc(sizeof(Template));
++	if (!tmpl)
++		errExit("malloc");
++
++	tmpl->key = strdup(key);
++	tmpl->value = strdup(value);
++	tmpl->next = NULL;
++
++	if (arg_debug)
++		fprintf(stdout, "Create template key \"%s\" value \"%s\"\n",
++								key, value);
++
++	return tmpl;
++}
++
++static void template_free(Template *tmpl)
++{
++	if (!tmpl)
++		return;
++
++	if (arg_debug)
++		fprintf(stdout, "free %p key \"%s\" value \"%s\"\n", tmpl,
++						tmpl->key, tmpl->value);
++
++	free(tmpl->key);
++	free(tmpl->value);
++	free(tmpl);
++}
++
++/*
++ * Get template with matching key, if list is empty or key is not found
++ * -ENOKEY is set to errno. With empty key -EINVAL is set.
++ */
++static Template* template_get(const char *key)
++{
++	Template *iter;
++
++	if (!key || !*key) {
++		errno = EINVAL;
++		return NULL;
++	}
++
++	iter = tmpl_list;
++	while (iter) {
++		if (!strcmp(key, iter->key))
++			return iter;
++
++		iter = iter->next;
++	}
++
++	errno = ENOKEY;
++	return NULL;
++}
++
++/* Return value for a key, errno is set by template_get() with NULL return. */
++static const char* template_get_value(const char *key)
++{
++	Template *tmpl;
++
++	tmpl = template_get(key);
++	if (!tmpl)
++		return NULL;
++
++	return tmpl->value;
++}
++
++/*
++ * Prepend template to the list. If the key already exists -EALREADY is
++ * reported back and caller must free the Template.
++ */
++static int template_add(Template *tmpl)
++{
++	if (!tmpl)
++		return -EINVAL;
++
++	if (tmpl_list && template_get(tmpl->key))
++		return -EALREADY;
++
++	tmpl->next = tmpl_list;
++	tmpl_list = tmpl;
++
++	return 0;
++}
++
++/* Free all the Templates in the list */
++void template_cleanup()
++{
++	Template *iter;
++	Template *curr;
++
++	iter = tmpl_list;
++	while (iter) {
++		curr = iter;
++		iter = iter->next;
++		template_free(curr);
++	}
++
++	tmpl_list = NULL;
++}
++
++/* For debugging, traverses Template list and prints out keys and values */
++void template_print_all()
++{
++	Template *iter;
++
++	if (!arg_debug)
++		return;
++
++	iter = tmpl_list;
++	while (iter) {
++		fprintf(stdout, "template key \"%s\" value \"%s\"\n",
++						iter->key, iter->value);
++		iter = iter->next;
++	}
++}
++
++static int is_compat_char(const char c)
++{
++	int i;
++
++	for (i = 0 ; TEMPLATE_STR_COMPAT_CHARS[i]; i++) {
++		if (c == TEMPLATE_STR_COMPAT_CHARS[i])
++			return 1;
++	}
++	return 0;
++}
++
++/* Check if the string is valid for the given type */
++static int is_valid_str(const char *str, StrCheckType type)
++{
++	int i;
++
++	if (!str || !*str)
++		return 0;
++
++	// Keys must start with an alphabetic char and the values must not
++	// exceed D-Bus limit.
++	switch (type) {
++	case STR_CHECK_ALNUM:
++		if (!isalpha(*str))
++			return 0;
++
++		break;
++	case STR_CHECK_COMPAT:
++		if (strlen(str) > DBUS_MAX_NAME_LENGTH)
++			return 0;
++
++		if (strstr(str, ".."))
++			return 0;
++
++		break;
++	}
++
++	for (i = 1; str[i]; i++) {
++		if (iscntrl(str[i]))
++			return 0;
++
++		switch (type) {
++		case STR_CHECK_ALNUM:
++			if (!isalnum(str[i]))
++				return 0;
++
++			break;
++		case STR_CHECK_COMPAT:
++			if (!isalnum(str[i]) && !is_compat_char(str[i]))
++				return 0;
++
++			break;
++		}
++	}
++
++	return 1;
++}
++
++/* TODO There should be a function in macro.c to check if a key is internal */
++const char *internal_keys[] = { "HOME", "CFG", "RUNUSER", "PATH", "PRIVILEGED",
++				NULL };
++
++/* Check if the key is in internal key list or it has a hardcoded macro. */
++static int is_internal_macro(const char *key)
++{
++	char *macro;
++	int i;
++
++	for (i = 0; internal_keys[i]; i++) {
++		if (!strcmp(key, internal_keys[i]))
++			return 1;
++	}
++
++	if (asprintf(&macro, "${%s}", key) == -1)
++		errExit("asprintf");
++
++	i = macro_id(macro);
++	free(macro);
++
++	if (i != -1)
++		return 1;
++
++	return 0;
++}
++
++/*
++ * Check the Template argument to have KEY:VALUE in valid format. A valid
++ * Template is added to template list. In case of invalid key, value, internal
++ * macro or existing key firejail is called to exit.
++ */
++void check_template(char *arg) {
++	Template *tmpl;
++	const char *key;
++	const char *value;
++	const char *delim = TEMPLATE_KEY_VALUE_DELIM;
++	char *saveptr;
++	int err;
++
++	/* Only alphanumeric chars in template key. */
++	key = strtok_r(arg, delim, &saveptr);
++	if (!is_valid_str(key, STR_CHECK_ALNUM)) {
++		fprintf(stderr, "Error invalid template key \"%s\"\n", key);
++		exit(1);
++	}
++
++	/* Only a-zA-Z0-9_ /*/
++	value = strtok_r(NULL, delim, &saveptr);
++	if (!is_valid_str(value, STR_CHECK_COMPAT)) {
++		fprintf(stderr, "Error invalid template value in \"%s:%s\"\n",
++								key, value);
++		exit(1);
++	}
++
++	/* Hardcoded macro or XDG value is not allowed to be overridden. */
++	if (is_internal_macro(key)) {
++		fprintf(stderr, "Error override of \"${%s}\" is not permitted\n",
++									key);
++		exit(1);
++	}
++
++	/* Returns either a Template or exits firejail */
++	tmpl = template_new(key, value);
++
++	err = template_add(tmpl);
++	switch (err) {
++	case 0:
++		return;
++	case -EINVAL:
++		fprintf(stderr, "Error invalid template key \"%s\" "
++						"value \"%s\"\n", key, value);
++		break;
++	case -EALREADY:
++		fprintf(stderr, "Error template key \"%s\" already exists\n",
++								key);
++		break;
++	}
++
++	template_free(tmpl);
++	exit(1);
++}
++
++/*
++ * Check if the argument contains template keys that should be expanded. Will
++ * return 1 only when there is at least one template key found. If an unknown
++ * template exists -EINVAL is returned.  If there is no '$' or the macros are
++ * internal only 0 is returned as there is nothing to expand.
++ */
++int template_requires_expansion(char *arg)
++{
++	char *ptr;
++
++	if (!arg || !*arg)
++		return 0;
++
++	ptr = strchr(arg, '$');
++	if (!ptr)
++		return 0;
++
++	while (*ptr) {
++		if (*ptr == '$' && *(ptr+1) == '{') {
++			char buf[DBUS_MAX_NAME_LENGTH] = { 0 };
++			int i;
++
++			// Copy template key name only
++			for (i = 0, ptr += 2; *ptr && *ptr != '}' &&
++						i < DBUS_MAX_NAME_LENGTH;
++						ptr++, i++)
++				buf[i] = *ptr;
++
++			if (is_internal_macro(buf))
++				continue;
++
++			// Invalid line if '${}' used but no valid template key
++			if (!template_get(buf))
++				return -EINVAL;
++
++			// At least one template key, needs template expansion
++			return 1;
++		}
++		++ptr;
++	}
++
++	return 0;
++}
++
++/*
++ * Concatenate str1 and str2 by reallocating str1 to fit both. Returns NULL
++ * if realloc() fails. Duplicates str2 if str1 is NULL.
++ */
++static char* append_to_string(char *str1, const char *str2)
++{
++	size_t len;
++
++	if (!str2)
++		return str1;
++
++	if (!str1)
++		return strdup(str2);
++
++	len = strlen(str2);
++	str1 = realloc(str1, strlen(str1) + len + 1);
++	if (!str1)
++		return NULL;
++
++	return strncat(str1, str2, len);
++}
++
++/*
++ * Replace the key with corresponding value in the str_in token, this is called
++ * only from template_replace_keys() to process the str_in between '{' and '}'
++ * since the line is tokenized first using '$'. With strtok_r() the '{' and '}'
++ * are replaced using as delimiters and only the first part of the str_in is
++ * the actual template key, which is replaced, rest is appended to the
++ * container. If the key is an internal macro it is added to container as
++ * '${MACRO_NAME}'. In case of error errno is set to EINVAL unless already
++ * being set by realloc() in append_to_string() or template_get() in
++ * template_get_value().
++ */
++static char *process_key_value(char *container, char *str_in)
++{
++	char *str;
++	char *token;
++	char *saveptr;
++	const char *delim = TEMPLATE_KEY_MACRO_SUB_DELIMS;
++	const char *value;
++
++	errno = 0;
++
++	for (str = str_in; ; str = NULL) {
++		token = strtok_r(str, delim, &saveptr);
++		if (!token)
++			break;
++
++		if (is_internal_macro(token)) {
++			char *macro;
++
++			if (asprintf(&macro, "${%s}", token) == -1)
++				errExit("asprintf");
++
++			container = append_to_string(container, macro);
++			free(macro);
++
++			if (!container)
++				goto err;
++
++			continue;
++		}
++
++		// Only the first iteration is the template key to be expanded
++		// and everything after the first token is added to the end.
++		value = str ? template_get_value(token) : token;
++		if (!value)
++			goto err;
++
++		container = append_to_string(container, value);
++		if (!container)
++			goto err;
++	}
++
++	return container;
++
++err:
++	if (container)
++		free(container);
++	else if (!errno)
++		errno = EINVAL;
++
++	return NULL;
++}
++
++/*
++ * Allocates new string with all template keys replaced with the values.
++ * Returns NULL if there is a nonexistent key, allocation fails or if arg
++ * begins with $. If arg does not contain $ it is only duplicated. Calls
++ * process_key_value to replace the template keys with corresponding values.
++ * If there are errors (invalid or missing keys) appropriate error is printed
++ * and errno is set accordingly by called functions (process_key_value() or
++ * append_to_string()).
++ */
++char *template_replace_keys(char *arg)
++{
++	char *new_string = NULL;
++	char *str;
++	char *token;
++	char *saveptr;
++	const char *delim = TEMPLATE_KEY_MACRO_DELIM;
++
++	if (!arg || !*arg)
++		return NULL;
++
++	if (!strchr(arg, '$'))
++		return strdup(arg);
++
++	// Templates must not be given at the beginning of the line
++	if (*arg == '$') {
++		fprintf(stderr, "Error line \"%s\" starts with \"$\"\n", arg);
++		return NULL;
++	}
++
++	for (str = arg; ; str = NULL) {
++		token = strtok_r(str, delim, &saveptr);
++		if (!token)
++			break;
++
++		/*
++		 * Process template values starting from the second token as
++		 * templates cannot be used at the beginning of the arg
++		 * because only hardcoded macros should be as first.
++		 */
++		if (!str) {
++			// Valid token must begin with '{' and to have '}'
++			if (*token != '{' && !strchr(token+1, '}')) {
++				if (new_string)
++					free(new_string);
++
++				fprintf(stderr, "Unterminated macro/template "
++							"key on line \"%s\"\n",
++							arg);
++				return NULL;
++			}
++
++			new_string = process_key_value(new_string, token);
++		} else {
++			new_string = append_to_string(new_string, token);
++		}
++
++		if (!new_string) {
++			fprintf(stderr, "Error invalid line \"%s\" (err %s)\n",
++							arg, strerror(errno));
++			return NULL;
++		}
++	}
++
++	return new_string;
++}
+diff --git a/src/firejail/usage.c b/src/firejail/usage.c
+index 6974e5fa..4fab375c 100644
+--- a/src/firejail/usage.c
++++ b/src/firejail/usage.c
+@@ -230,6 +230,7 @@ static char *usage_str =
+ 	"    --shell=none - run the program directly without a user shell.\n"
+ 	"    --shell=program - set default user shell.\n"
+ 	"    --shutdown=name|pid - shutdown the sandbox identified by name or PID.\n"
++	"    --template=KEY:VALUE - set a template KEY with VALUE usable as ${KEY} in profiles\n"
+ 	"    --timeout=hh:mm:ss - kill the sandbox automatically after the time\n"
+ 	"\thas elapsed.\n"
+ 	"    --tmpfs=dirname - mount a tmpfs filesystem on directory dirname.\n"
+diff --git a/src/man/firejail-profile.txt b/src/man/firejail-profile.txt
+index 030a3c95..3b725ac5 100644
+--- a/src/man/firejail-profile.txt
++++ b/src/man/firejail-profile.txt
+@@ -881,6 +881,20 @@ Always exit firejail with the first child's exit status. The default behavior is
+ Join the sandbox identified by name or start a new one.
+ Same as "firejail --join=sandboxname" command if sandbox with specified name exists, otherwise same as "name sandboxname".
+ 
++.SH Template keys
++.TP
++Profile files can have custom template keys defined with similar to macro format: \fB${KEY}\fR. These keys can be used anywhere in the profile but not at the beginning of the line.
++.TP
++If a key on the profile line is not defined with \fB\-\-template=KEY:VALUE\fR then the complete line will be ignored. Multiple keys can be defined on a single line. Template key usage does not interfere with macros, since macros cannot be overridden. A key must start with an alphanumeric character and can contain digits. See \fB\&\flfirejail\fR\|(1)\fR for more information on how to define the values with \fB\-\-template\fR.
++.br
++
++.br
++Example: dbus-user.own org.name.Client.${AppName}
++.br
++Example: whitelist ${HOME}/.config/${OrgName}/applications/${AppName}/
++.br
++Example: include /usr/local/etc/${ProfilePath}/${Name1}/${Name2}.${CustomSuffix}
++
+ .SH FILES
+ /etc/firejail/filename.profile, $HOME/.config/firejail/filename.profile
+ 
+diff --git a/src/man/firejail.txt b/src/man/firejail.txt
+index 8958dfae..74496609 100644
+--- a/src/man/firejail.txt
++++ b/src/man/firejail.txt
+@@ -2504,6 +2504,23 @@ $ firejail \-\-list
+ .br
+ $ firejail \-\-shutdown=3272
+ .TP
++\fB\-\-template=KEY:VALUE
++Define a template \fBKEY\fR with \fBVALUE\fR to have application specific \fB${KEY}\fRs in the profile files replaced with the given value. This is useful, for example, with D-Bus name ownership to make a generic ownership rule to be application specific. See \fB\&\flfirejail-profile\fR\|(5)\fR for information on how to use the template keys in profile files. Internal macros cannot be overridden with this, in such case firejail quits with an error message.
++.br
++
++.br
++Keys must start with an alphabetic character (A-Za-z) and can contain alphanumeric characters. Values can have alphanumeric and '._/' characters, and they must be under the D-Bus name length limit (255 chars). A value cannot contain consequtive dots ('..').
++.br
++
++.br
++Example:
++.br
++$ firejail \-\-template=AppName:MyAppName
++.br
++
++.br
++Will change profile file line "dbus\-user\.own org\.name\.Client\.${AppName}" -> "dbus\-user\.own org\.name\.Client\.MyAppName".
++.TP
+ \fB\-\-timeout=hh:mm:ss
+ Kill the sandbox automatically after the time has elapsed. The time is specified in hours/minutes/seconds format.
+ .br
+-- 
+2.20.1
+

@@ -1,0 +1,28 @@
+From b47d4c86bc6187a34c691fbdaceb9707d06418a9 Mon Sep 17 00:00:00 2001
+From: Dmitry <d.okoshkin@omp.ru>
+Date: Thu, 10 Jun 2021 14:37:02 +0300
+Subject: [PATCH] Allow mkdir for /home/.shared directory
+
+---
+ src/firejail/fs_mkdir.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/firejail/fs_mkdir.c b/src/firejail/fs_mkdir.c
+index 0e213f2f..c58020a6 100644
+--- a/src/firejail/fs_mkdir.c
++++ b/src/firejail/fs_mkdir.c
+@@ -34,8 +34,9 @@ static void check(const char *fname) {
+ 
+ 	if (strncmp(fname, cfg.homedir, strlen(cfg.homedir)) != 0 &&
+ 	    strncmp(fname, "/tmp", 4) != 0 &&
+-	    strncmp(fname, runuser, strlen(runuser)) != 0) {
+-		fprintf(stderr, "Error: only files or directories in user home, /tmp, or /run/user/<UID> are supported by mkdir\n");
++	    strncmp(fname, runuser, strlen(runuser)) != 0 &&
++	    strncmp(fname, "/home/.shared", 13) != 0) {
++		fprintf(stderr, "Error: only files or directories in user home, /home/.shared, /tmp, or /run/user/<UID> are supported by mkdir\n");
+ 		exit(1);
+ 	}
+ 	free(runuser);
+-- 
+2.31.1.windows.1
+

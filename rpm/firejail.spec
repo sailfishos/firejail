@@ -18,6 +18,7 @@ Patch9:  0009-Preserve-process-effective-group-for-privileged-grou.patch
 Patch10: 0010-Implement-Sailfish-OS-specific-privileged-data-optio.patch
 Patch11: 0011-Add-profile-files-to-a-list-when-processing-argument.patch
 Patch12: 0012-Implement-template-addition-for-replacing-keys-in-pr.patch
+Patch13: 0013-Allow-mkdir-for-home-.shared-directory.patch
 
 URL: https://github.com/sailfishos/firejail
 

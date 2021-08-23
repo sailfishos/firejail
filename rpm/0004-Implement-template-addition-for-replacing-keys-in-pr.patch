@@ -1,4 +1,4 @@
-From 87906fc34da4ea95e6bab1c881a44bd24e7a433c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jussi Laakkonen <jussi.laakkonen@jolla.com>
 Date: Fri, 7 May 2021 18:29:29 +0300
 Subject: [PATCH] Implement template addition for replacing keys in profile
@@ -66,7 +66,7 @@ key is not found firejail will exit with an error.
 Man pages for firejail and firejail-profile are updated to include this
 addition.
 ---
- src/firejail/dbus.c          |   4 +-
+ src/firejail/dbus.c          |   2 +-
  src/firejail/firejail.h      |   8 +
  src/firejail/main.c          |  11 +
  src/firejail/profile.c       |  34 +++
@@ -74,11 +74,11 @@ addition.
  src/firejail/usage.c         |   1 +
  src/man/firejail-profile.txt |  14 +
  src/man/firejail.txt         |  17 ++
- 8 files changed, 591 insertions(+), 2 deletions(-)
+ 8 files changed, 590 insertions(+), 1 deletion(-)
  create mode 100644 src/firejail/template.c
 
 diff --git a/src/firejail/dbus.c b/src/firejail/dbus.c
-index 3cf75ed8..8b5e52f4 100644
+index 9a4cb2e6..80385376 100644
 --- a/src/firejail/dbus.c
 +++ b/src/firejail/dbus.c
 @@ -41,7 +41,7 @@
@@ -90,18 +90,11 @@ index 3cf75ed8..8b5e52f4 100644
  // moved to include/common.h - #define XDG_DBUS_PROXY_PATH "/usr/bin/xdg-dbus-proxy"
  
  static pid_t dbus_proxy_pid = 0;
-@@ -561,4 +561,4 @@ void dbus_apply_policy(void) {
- 
- 	fwarning("An abstract unix socket for session D-BUS might still be available. Use --net or remove unix from --protocol set.\n");
- }
--#endif // HAVE_DBUSPROXY
-\ No newline at end of file
-+#endif // HAVE_DBUSPROXY
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index 5ac874e0..fdf49873 100644
+index 28c1d81e..77e5a830 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
-@@ -863,6 +863,8 @@ void set_x11_run_file(pid_t pid, int display);
+@@ -888,6 +888,8 @@ void set_x11_run_file(pid_t pid, int display);
  void set_profile_run_file(pid_t pid, const char *fname);
  
  // dbus.c
@@ -110,7 +103,7 @@ index 5ac874e0..fdf49873 100644
  int dbus_check_name(const char *name);
  int dbus_check_call_rule(const char *name);
  void dbus_check_profile(void);
-@@ -881,4 +883,10 @@ void dhcp_start(void);
+@@ -906,4 +908,10 @@ void dhcp_start(void);
  // selinux.c
  void selinux_relabel_path(const char *path, const char *inside_path);
  
@@ -122,10 +115,10 @@ index 5ac874e0..fdf49873 100644
 +void template_cleanup();
  #endif
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 88b99de7..e02e96c4 100644
+index 5d92df2d..252371be 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
-@@ -2598,6 +2598,11 @@ int main(int argc, char **argv, char **envp) {
+@@ -2649,6 +2649,11 @@ int main(int argc, char **argv, char **envp) {
  				exit_err_feature("networking");
  		}
  #endif
@@ -137,7 +130,7 @@ index 88b99de7..e02e96c4 100644
  		//*************************************
  		// command
  		//*************************************
-@@ -2733,6 +2738,9 @@ int main(int argc, char **argv, char **envp) {
+@@ -2762,6 +2767,9 @@ int main(int argc, char **argv, char **envp) {
  		}
  	}
  
@@ -147,7 +140,7 @@ index 88b99de7..e02e96c4 100644
  	profile_read_file_list();
  
  	EUID_ASSERT();
-@@ -2852,6 +2860,9 @@ int main(int argc, char **argv, char **envp) {
+@@ -2893,6 +2901,9 @@ int main(int argc, char **argv, char **envp) {
  	}
  	EUID_ASSERT();
  
@@ -158,10 +151,10 @@ index 88b99de7..e02e96c4 100644
  	if (arg_x11_block)
  		x11_block();
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index 9de72826..9cd53833 100644
+index 2c172ad1..9f0e5baf 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1773,6 +1773,40 @@ void profile_read(const char *fname) {
+@@ -1812,6 +1812,40 @@ void profile_read(const char *fname) {
  			msg_printed = 1;
  		}
  
@@ -713,10 +706,10 @@ index 00000000..64bcef5e
 +	return new_string;
 +}
 diff --git a/src/firejail/usage.c b/src/firejail/usage.c
-index 6974e5fa..4fab375c 100644
+index 098bf696..4598f3c7 100644
 --- a/src/firejail/usage.c
 +++ b/src/firejail/usage.c
-@@ -230,6 +230,7 @@ static char *usage_str =
+@@ -239,6 +239,7 @@ static char *usage_str =
  	"    --shell=none - run the program directly without a user shell.\n"
  	"    --shell=program - set default user shell.\n"
  	"    --shutdown=name|pid - shutdown the sandbox identified by name or PID.\n"
@@ -725,10 +718,10 @@ index 6974e5fa..4fab375c 100644
  	"\thas elapsed.\n"
  	"    --tmpfs=dirname - mount a tmpfs filesystem on directory dirname.\n"
 diff --git a/src/man/firejail-profile.txt b/src/man/firejail-profile.txt
-index 030a3c95..3b725ac5 100644
+index db58e091..b0ff631b 100644
 --- a/src/man/firejail-profile.txt
 +++ b/src/man/firejail-profile.txt
-@@ -881,6 +881,20 @@ Always exit firejail with the first child's exit status. The default behavior is
+@@ -965,6 +965,20 @@ Always exit firejail with the first child's exit status. The default behavior is
  Join the sandbox identified by name or start a new one.
  Same as "firejail --join=sandboxname" command if sandbox with specified name exists, otherwise same as "name sandboxname".
  
@@ -747,13 +740,13 @@ index 030a3c95..3b725ac5 100644
 +Example: include /usr/local/etc/${ProfilePath}/${Name1}/${Name2}.${CustomSuffix}
 +
  .SH FILES
- /etc/firejail/filename.profile, $HOME/.config/firejail/filename.profile
- 
+ .TP
+ \fB/etc/firejail/appname.profile
 diff --git a/src/man/firejail.txt b/src/man/firejail.txt
-index 8958dfae..74496609 100644
+index 0462705c..d6036605 100644
 --- a/src/man/firejail.txt
 +++ b/src/man/firejail.txt
-@@ -2504,6 +2504,23 @@ $ firejail \-\-list
+@@ -2573,6 +2573,23 @@ $ firejail \-\-list
  .br
  $ firejail \-\-shutdown=3272
  .TP
@@ -778,5 +771,5 @@ index 8958dfae..74496609 100644
  Kill the sandbox automatically after the time has elapsed. The time is specified in hours/minutes/seconds format.
  .br
 -- 
-2.20.1
+2.31.1
 

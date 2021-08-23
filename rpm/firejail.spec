@@ -1,23 +1,14 @@
 Name: firejail
-Version: 0.9.64.4
+Version: 0.9.66
 Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+
 Source0: %{name}-%{version}.tar.bz2
-# Upstreamed and will be in a future version
-Patch1:  0001-Fix-symlinks-that-go-though-proc-self.patch
-Patch2:  0002-fcopy-Fix-memory-leaks.patch
-Patch3:  0003-sandbox-Do-not-leave-file-mounts-underneath-private-.patch
-Patch4:  0004-Add-missing-linefeeds-in-stderr-logging.patch
-Patch5:  0005-Add-checks-to-fs_private_dir_mount.patch
-Patch6:  0006-Add-mkdir-and-mkfile-command-line-options-for-fireja.patch
-Patch7:  0007-Add-utility-functions-for-handling-comma-separated-l.patch
-Patch8:  0008-Allow-changing-protocol-list-after-initial-set.patch
 # Sailfish OS patches
-Patch9:  0009-Preserve-process-effective-group-for-privileged-grou.patch
-Patch10: 0010-Implement-Sailfish-OS-specific-privileged-data-optio.patch
-Patch11: 0011-Add-profile-files-to-a-list-when-processing-argument.patch
-Patch12: 0012-Implement-template-addition-for-replacing-keys-in-pr.patch
+Patch1: 0001-Preserve-process-effective-group-for-privileged-grou.patch
+Patch2: 0002-Implement-Sailfish-OS-specific-privileged-data-optio.patch
+Patch3: 0003-Add-profile-files-to-a-list-when-processing-argument.patch
+Patch4: 0004-Implement-template-addition-for-replacing-keys-in-pr.patch
 
 URL: https://github.com/sailfishos/firejail
 
@@ -31,7 +22,7 @@ Summary: %{name} profiles
 Requires: %{name} = %{version}-%{release}
 
 %description profiles
-%{summary} and firecfg tool.
+%{summary} plus firecfg and jailcheck tools.
 
 %package doc
 Summary: Documentation for %{name}
@@ -54,6 +45,7 @@ Requires: %{name} = %{version}-%{release}
 %install
 %make_install
 rm -rf %{buildroot}%{_datadir}/bash-completion
+rm -rf %{buildroot}%{_datadir}/zsh/site-functions/_firejail
 
 %files
 %license COPYING
@@ -69,6 +61,7 @@ rm -rf %{buildroot}%{_datadir}/bash-completion
 
 %files profiles
 %{_bindir}/firecfg
+%{_bindir}/jailcheck
 %{_libdir}/%{name}/firecfg.config
 %exclude %{_sysconfdir}/%{name}/*.config
 %exclude %{_sysconfdir}/%{name}/disable-*.inc

@@ -1,0 +1,26 @@
+From a6d3f46e989ad5a71b3d02ff0165702292ebde5d Mon Sep 17 00:00:00 2001
+From: Dmitry <d.okoshkin@omp.ru>
+Date: Mon, 30 Aug 2021 12:48:33 +0300
+Subject: [PATCH] Allow mkdir for root /home
+
+---
+ src/firejail/fs_mkdir.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/firejail/fs_mkdir.c b/src/firejail/fs_mkdir.c
+index 4983db0a..659e4040 100644
+--- a/src/firejail/fs_mkdir.c
++++ b/src/firejail/fs_mkdir.c
+@@ -34,7 +34,8 @@ static void check(const char *fname) {
+ 
+ 	if (strncmp(fname, cfg.homedir, strlen(cfg.homedir)) != 0 &&
+ 	    strncmp(fname, "/tmp", 4) != 0 &&
+-	    strncmp(fname, runuser, strlen(runuser)) != 0) {
++	    strncmp(fname, runuser, strlen(runuser)) != 0 &&
++	    strncmp(fname, "/home", 5) != 0) {
+ 		fprintf(stderr, "Error: only files or directories in user home, /tmp, or /run/user/<UID> are supported by mkdir\n");
+ 		exit(1);
+ 	}
+-- 
+2.31.1.windows.1
+

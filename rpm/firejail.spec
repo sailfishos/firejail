@@ -10,6 +10,7 @@ Patch2: 0002-Implement-Sailfish-OS-specific-privileged-data-optio.patch
 Patch3: 0003-Add-profile-files-to-a-list-when-processing-argument.patch
 Patch4: 0004-Implement-template-addition-for-replacing-keys-in-pr.patch
 Patch5: 0005-Retain-symlink-chains.patch
+Patch6: 0006-Add-xstat-tracing-and-optionally-log-only-failing-ca.patch
 
 URL: https://github.com/sailfishos/firejail
 

@@ -1,0 +1,1101 @@
+From 9a868fc4de943a4ce25d137a56357ca365cfd234 Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Tue, 9 Nov 2021 16:08:37 +0200
+Subject: [PATCH] Add xstat() tracing and optionally log only failing calls
+
+Tracing does not log any stat() calls applications are making. This
+happens because nowadays linux glibc implements stat() family
+functionality via macros that call xstat() functions - which then
+effectively makes trapping stat() functions useless.
+
+Adding traps for xstat() family functions solves this issue.
+
+Also, when there is need to trace, often one is interested in only
+failing calls - which can be hard to spot due to noise generated from
+logging of successful calls.
+
+Refactor trap functions so that only failing calls are logged if
+FIREJAIL_VERBOSE_TRACE=no is set in environment.
+
+To ease failure analysis, log all arguments passed to functions and
+in case of failures also errno.
+
+Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
+---
+ src/libtrace/libtrace.c | 860 ++++++++++++++++++++++++----------------
+ 1 file changed, 509 insertions(+), 351 deletions(-)
+
+diff --git a/src/libtrace/libtrace.c b/src/libtrace/libtrace.c
+index d88512b0..d78c6d76 100644
+--- a/src/libtrace/libtrace.c
++++ b/src/libtrace/libtrace.c
+@@ -20,6 +20,8 @@
+ #define _GNU_SOURCE
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <stdarg.h>
++#include <stdbool.h>
+ #include <string.h>
+ #include <dlfcn.h>
+ #include <sys/types.h>
+@@ -30,90 +32,79 @@
+ #include <arpa/inet.h>
+ #include <sys/un.h>
+ #include <sys/stat.h>
++#include <sys/wait.h>
++#include <errno.h>
++#include <fcntl.h>
+ #include <syslog.h>
+ #include <dirent.h>
+ #include "../include/rundefs.h"
+ 
+-#define tprintf(fp, args...) \
+-    do { \
+-        if (!fp)\
+-            init(); \
+-        fprintf(fp, args); \
+-    } while(0)
+-
+-// break recursivity on fopen call
+-typedef FILE *(*orig_fopen_t)(const char *pathname, const char *mode);
+-static orig_fopen_t orig_fopen = NULL;
+-typedef FILE *(*orig_fopen64_t)(const char *pathname, const char *mode);
+-static orig_fopen64_t orig_fopen64 = NULL;
+-typedef int (*orig_access_t)(const char *pathname, int mode);
+-static orig_access_t orig_access = NULL;
+-
+-//
+-// library constructor/destructor
+-//
+-// Using fprintf to /dev/tty instead of printf in order to fix #561
++static bool verbose = true;
+ static FILE *ftty = NULL;
+ static pid_t mypid = 0;
+ #define MAXNAME 16 // 8 or larger
+ static char myname[MAXNAME] = "unknown";
+ 
+-static void init(void) __attribute__((constructor));
+-void init(void) {
+-	if (ftty)
+-		return;
++static FILE *output(void);
+ 
+-	orig_fopen = (orig_fopen_t)dlsym(RTLD_NEXT, "fopen");
+-	orig_access = (orig_access_t)dlsym(RTLD_NEXT, "access");
++__attribute__((format(printf, 1, 2))) static void message(const char *fmt, ...) {
++	// We need to ensure that trace logging does not
++	// interfere with errno that application code gets
++	// to see
++	int saved = errno;
+ 
+-	// allow environment variable to override defaults
+-	char *logfile = getenv("FIREJAIL_TRACEFILE");
+-	if (!logfile) {
+-		// if exists, log to trace file
+-		logfile = RUN_TRACE_FILE;
+-		if (orig_access(logfile, F_OK))
+-			// else log to associated tty
+-			logfile = "/dev/tty";
+-	}
++	char *text = NULL;
++	va_list va;
++	va_start(va, fmt);
++	if (vasprintf(&text, fmt, va) < 0)
++		text = NULL;
++	va_end(va);
+ 
+-	// logfile
+-	unsigned cnt = 0;
+-	while ((ftty = orig_fopen(logfile, "a")) == NULL) {
+-		if (++cnt > 10) { // 10 sec
+-			perror("Cannot open trace log file");
+-			exit(1);
+-		}
+-		sleep(1);
+-	}
+-	// line buffered stream
+-	setvbuf(ftty, NULL, _IOLBF, BUFSIZ);
++	// As the 1st output() call evaluates mypid & myname,
++	// it needs to be done before using those variables
++	FILE *file = output() ?: stderr;
+ 
+-	// pid
+-	mypid = getpid();
++	fprintf(file, "%u:%s:%s\n", mypid, myname, text ?: fmt);
++	free(text);
+ 
+-	// process name
+-	char *fname;
+-	if (asprintf(&fname, "/proc/%u/comm", mypid) != -1) {
+-		FILE *fp = orig_fopen(fname, "r");
+-		free(fname);
+-		if (fp) {
+-			if (fgets(myname, MAXNAME, fp) == NULL)
+-				strcpy(myname, "unknown");
+-			fclose(fp);
+-		}
+-	}
+-
+-	// clean '\n'
+-	char *ptr = strchr(myname, '\n');
+-	if (ptr)
+-		*ptr = '\0';
+-
+-//	tprintf(ftty, "=== tracelib init() [%d:%s] === \n", mypid, myname);
++	errno = saved;
+ }
+ 
+-static void fini(void) __attribute__((destructor));
+-void fini(void) {
+-	fclose(ftty);
++static void *lookup(const char *name) {
++	// Map internally used "silent" wrappers to actual
++	// functions, for example: silent_fopen() -> fopen()
++	static const char silent[] = "silent_";
++	if (!strncmp(name, silent, sizeof silent - 1))
++		name += sizeof silent - 1;
++
++	void *addr = dlsym(RTLD_NEXT, name);
++	if (!addr) {
++		// We do not really expect to get here. But if it does
++		// happen, we need to report symbol lookup failures using
++		// functions that are not trapped even indirectly
++		auto void dump_str(const char *txt) {
++			if (write(STDERR_FILENO, txt, strlen(txt)) < 0) {
++				// dontcare
++			}
++		}
++		auto void dump_num(unsigned num) {
++			char stk[16];
++			size_t sp = sizeof stk;
++			stk[--sp] = 0;
++			do {
++				stk[--sp] = '0' + num % 10u;
++			} while ((num /= 10u) && sp > 0);
++			dump_str(stk + sp);
++		}
++		dump_num(mypid);
++		dump_str(":");
++		dump_str(myname);
++		dump_str(": Failed to resolve symbol: '");
++		dump_str(name);
++		dump_str("'\n");
++		abort();
++	}
++	return addr;
+ }
+ 
+ //
+@@ -257,459 +248,626 @@ static char *translate(XTable *table, int val) {
+ 	return NULL;
+ }
+ 
+-static void print_sockaddr(int sockfd, const char *call, const struct sockaddr *addr, int rv) {
++static char *sockaddr_repr(const struct sockaddr *addr, char *buff, size_t size) {
+ 	if (addr->sa_family == AF_INET) {
+ 		struct sockaddr_in *a = (struct sockaddr_in *) addr;
+-		tprintf(ftty, "%u:%s:%s %d %s port %u:%d\n", mypid, myname, call, sockfd, inet_ntoa(a->sin_addr), ntohs(a->sin_port), rv);
++		snprintf(buff, size, "%s port %u", inet_ntoa(a->sin_addr), ntohs(a->sin_port));
+ 	}
+ 	else if (addr->sa_family == AF_INET6) {
+ 		struct sockaddr_in6 *a = (struct sockaddr_in6 *) addr;
+ 		char str[INET6_ADDRSTRLEN];
+ 		inet_ntop(AF_INET6, &(a->sin6_addr), str, INET6_ADDRSTRLEN);
+-		tprintf(ftty, "%u:%s:%s %d %s:%d\n", mypid, myname, call, sockfd, str, rv);
++		snprintf(buff, size, "%s", str);
+ 	}
+ 	else if (addr->sa_family == AF_UNIX) {
+ 		struct sockaddr_un *a = (struct sockaddr_un *) addr;
+ 		if (a->sun_path[0])
+-			tprintf(ftty, "%u:%s:%s %d %s:%d\n", mypid, myname, call, sockfd, a->sun_path, rv);
++			snprintf(buff, size, "%s", a->sun_path);
+ 		else
+-			tprintf(ftty, "%u:%s:%s %d @%s:%d\n", mypid, myname, call, sockfd, a->sun_path + 1, rv);
++			snprintf(buff, size, "@%s", a->sun_path + 1);
+ 	}
+ 	else {
+-		tprintf(ftty, "%u:%s:%s %d family %d:%d\n", mypid, myname, call, sockfd, addr->sa_family, rv);
++		snprintf(buff, size, "family %d", addr->sa_family);
+ 	}
++	return buff;
++}
++
++static char *socket_repr(int domain, int type, int protocol, char *buff, size_t size) {
++	char domain_buf[16];
++	char type_buf[16];
++	char protocol_buf[16];
++	const char *domain_str;
++	const char *type_str;
++	const char *protocol_str;
++
++	if (!(domain_str = translate(socket_domain, domain))) {
++		snprintf(domain_buf, sizeof domain_buf, "%d", domain);
++		domain_str = domain_buf;
++	}
++
++	// glibc uses higher bits for various other purposes
++# ifdef SOCK_CLOEXEC
++	type &= ~SOCK_CLOEXEC;
++# endif
++# ifdef SOCK_NONBLOCK
++	type &= ~SOCK_NONBLOCK;
++# endif
++	if (!(type_str = translate(socket_type, type))) {
++		snprintf(type_buf, sizeof type_buf, "%d", type);
++		type_str = type_buf;
++	}
++
++	if (domain == AF_LOCAL) {
++		protocol_str = "0";
++	}
++	else if (!(protocol_str = translate(socket_protocol, protocol))) {
++		snprintf(protocol_buf, sizeof protocol_buf, "%d", protocol);
++		protocol_str = protocol_buf;
++	}
++
++	snprintf(buff, size, "%s %s %s", domain_str, type_str, protocol_str);
++	return buff;
+ }
+ 
+ //
+ // syscalls
+ //
+ 
++#define REAL(TYPE, ARGS...)\
++	static TYPE (*real)(ARGS) = NULL;\
++	do {\
++		if (!real) {\
++			real = lookup(__func__);\
++		}\
++	} while (0)
++
+ // open
+-typedef int (*orig_open_t)(const char *pathname, int flags, mode_t mode);
+-static orig_open_t orig_open = NULL;
+-int open(const char *pathname, int flags, mode_t mode) {
+-	if (!orig_open)
+-		orig_open = (orig_open_t)dlsym(RTLD_NEXT, "open");
+-
+-	int rv = orig_open(pathname, flags, mode);
+-	tprintf(ftty, "%u:%s:open %s:%d\n", mypid, myname, pathname, rv);
++int open(const char *pathname, int flags, ...) {
++	REAL(int, const char *pathname, int flags, mode_t mode);
++	mode_t mode = 0;
++	if (flags & O_CREAT) {
++		va_list va;
++		va_start(va, flags);
++		mode = va_arg(va, mode_t);
++		va_end(va);
++	}
++	int rv = real(pathname, flags, mode);
++	if (rv == -1)
++		message("%s %s %d %#3o:%d (errno=%d)", __func__, pathname, flags, mode, rv, errno);
++	else if (verbose)
++		message("%s %s %d %#3o:%d", __func__, pathname, flags, mode, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_open64_t)(const char *pathname, int flags, mode_t mode);
+-static orig_open64_t orig_open64 = NULL;
+-int open64(const char *pathname, int flags, mode_t mode) {
+-	if (!orig_open64)
+-		orig_open64 = (orig_open64_t)dlsym(RTLD_NEXT, "open64");
+-
+-	int rv = orig_open64(pathname, flags, mode);
+-	tprintf(ftty, "%u:%s:open64 %s:%d\n", mypid, myname, pathname, rv);
++int open64(const char *pathname, int flags, ...) {
++	REAL(int, const char *pathname, int flags, mode_t mode);
++	mode_t mode = 0;
++	if (flags & O_CREAT) {
++		va_list va;
++		va_start(va, flags);
++		mode = va_arg(va, mode_t);
++		va_end(va);
++	}
++	int rv = real(pathname, flags, mode);
++	if (!(flags & O_CREAT))
++		mode = 0;
++	if (rv == -1)
++		message("%s %s %d %#3o:%d (errno=%d)", __func__, pathname, flags, mode, rv, errno);
++	else if (verbose)
++		message("%s %s %d %#3o:%d", __func__, pathname, flags, mode, rv);
+ 	return rv;
+ }
+ 
+ // openat
+-typedef int (*orig_openat_t)(int dirfd, const char *pathname, int flags, mode_t mode);
+-static orig_openat_t orig_openat = NULL;
+-int openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+-	if (!orig_openat)
+-		orig_openat = (orig_openat_t)dlsym(RTLD_NEXT, "openat");
+-
+-	int rv = orig_openat(dirfd, pathname, flags, mode);
+-	tprintf(ftty, "%u:%s:openat %s:%d\n", mypid, myname, pathname, rv);
++int openat(int dirfd, const char *pathname, int flags, ...) {
++	REAL(int, int dirfd, const char *pathname, int flags, mode_t mode);
++	mode_t mode = 0;
++	if (flags & O_CREAT) {
++		va_list va;
++		va_start(va, flags);
++		mode = va_arg(va, mode_t);
++		va_end(va);
++	}
++	int rv = real(dirfd, pathname, flags, mode);
++	if (rv == -1)
++		message("%s %d %s %d %#3o:%d (errno=%d)", __func__, dirfd, pathname, flags, mode, rv, errno);
++	else if (verbose)
++		message("%s %d %s %d %#3o:%d", __func__, dirfd, pathname, flags, mode, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_openat64_t)(int dirfd, const char *pathname, int flags, mode_t mode);
+-static orig_openat64_t orig_openat64 = NULL;
+-int openat64(int dirfd, const char *pathname, int flags, mode_t mode) {
+-	if (!orig_openat64)
+-		orig_openat64 = (orig_openat64_t)dlsym(RTLD_NEXT, "openat64");
+-
+-	int rv = orig_openat64(dirfd, pathname, flags, mode);
+-	tprintf(ftty, "%u:%s:openat64 %s:%d\n", mypid, myname, pathname, rv);
++int openat64(int dirfd, const char *pathname, int flags, ...) {
++	REAL(int, int dirfd, const char *pathname, int flags, mode_t mode);
++	mode_t mode = 0;
++	if (flags & O_CREAT) {
++		va_list va;
++		va_start(va, flags);
++		mode = va_arg(va, mode_t);
++		va_end(va);
++	}
++	int rv = real(dirfd, pathname, flags, mode);
++	if (rv == -1)
++		message("%s %s:%d (errno=%d)", __func__, pathname, rv, errno);
++	else if (verbose)
++		message("%s %s:%d", __func__, pathname, rv);
+ 	return rv;
+ }
+ 
+-
+ // fopen
++static FILE *silent_fopen(const char *pathname, const char *mode) {
++	REAL(FILE *, const char *pathname, const char *mode);
++	FILE *rv = real(pathname, mode);
++	return rv;
++}
++
+ FILE *fopen(const char *pathname, const char *mode) {
+-	if (!orig_fopen)
+-		orig_fopen = (orig_fopen_t)dlsym(RTLD_NEXT, "fopen");
+-
+-	FILE *rv = orig_fopen(pathname, mode);
+-	tprintf(ftty, "%u:%s:fopen %s:%p\n", mypid, myname, pathname, rv);
++	FILE *rv = silent_fopen(pathname, mode);
++	if (!rv)
++		message("%s %s %s:%p (errno=%d)", __func__, pathname, mode, rv, errno);
++	else if (verbose)
++		message("%s %s %s:%p", __func__, pathname, mode, rv);
+ 	return rv;
+ }
+ 
+ #ifdef __GLIBC__
+ FILE *fopen64(const char *pathname, const char *mode) {
+-	if (!orig_fopen64)
+-		orig_fopen64 = (orig_fopen_t)dlsym(RTLD_NEXT, "fopen64");
+-
+-	FILE *rv = orig_fopen64(pathname, mode);
+-	tprintf(ftty, "%u:%s:fopen64 %s:%p\n", mypid, myname, pathname, rv);
++	REAL(FILE *, const char *pathname, const char *mode);
++	FILE *rv = real(pathname, mode);
++	if (!rv)
++		message("%s %s %s:%p (errno=%d)", __func__, pathname, mode, rv, errno);
++	else if (verbose)
++		message("%s %s %s:%p", __func__, pathname, mode, rv);
+ 	return rv;
+ }
+ #endif /* __GLIBC__ */
+ 
+-
+ // freopen
+-typedef FILE *(*orig_freopen_t)(const char *pathname, const char *mode, FILE *stream);
+-static orig_freopen_t orig_freopen = NULL;
+ FILE *freopen(const char *pathname, const char *mode, FILE *stream) {
+-	if (!orig_freopen)
+-		orig_freopen = (orig_freopen_t)dlsym(RTLD_NEXT, "freopen");
+-
+-	FILE *rv = orig_freopen(pathname, mode, stream);
+-	tprintf(ftty, "%u:%s:freopen %s:%p\n", mypid, myname, pathname, rv);
++	REAL(FILE *, const char *pathname, const char *mode, FILE *stream);
++	FILE *rv = real(pathname, mode, stream);
++	if (!rv)
++		message("%s %s %s %p:%p (errno=%d)", __func__, pathname, mode, stream, rv, errno);
++	else if (verbose)
++		message("%s %s %s %p:%p", __func__, pathname, mode, stream, rv);
+ 	return rv;
+ }
+ 
+ #ifdef __GLIBC__
+-typedef FILE *(*orig_freopen64_t)(const char *pathname, const char *mode, FILE *stream);
+-static orig_freopen64_t orig_freopen64 = NULL;
+ FILE *freopen64(const char *pathname, const char *mode, FILE *stream) {
+-	if (!orig_freopen64)
+-		orig_freopen64 = (orig_freopen64_t)dlsym(RTLD_NEXT, "freopen64");
+-
+-	FILE *rv = orig_freopen64(pathname, mode, stream);
+-	tprintf(ftty, "%u:%s:freopen64 %s:%p\n", mypid, myname, pathname, rv);
++	REAL(FILE *, const char *pathname, const char *mode, FILE *stream);
++	FILE *rv = real(pathname, mode, stream);
++	if (!rv)
++		message("%s %s %s %p:%p (errno=%d)", __func__, pathname, mode, stream, rv, errno);
++	else if (verbose)
++		message("%s %s %s %p:%p", __func__, pathname, mode, stream, rv);
+ 	return rv;
+ }
+ #endif /* __GLIBC__ */
+ 
+ // unlink
+-typedef int (*orig_unlink_t)(const char *pathname);
+-static orig_unlink_t orig_unlink = NULL;
+ int unlink(const char *pathname) {
+-	if (!orig_unlink)
+-		orig_unlink = (orig_unlink_t)dlsym(RTLD_NEXT, "unlink");
+-
+-	int rv = orig_unlink(pathname);
+-	tprintf(ftty, "%u:%s:unlink %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, const char *pathname);
++	int rv = real(pathname);
++	if (rv == -1)
++		message("%s %s:%d (errno=%d)", __func__, pathname, rv, errno);
++	else if (verbose)
++		message("%s %s:%d", __func__, pathname, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_unlinkat_t)(int dirfd, const char *pathname, int flags);
+-static orig_unlinkat_t orig_unlinkat = NULL;
+ int unlinkat(int dirfd, const char *pathname, int flags) {
+-	if (!orig_unlinkat)
+-		orig_unlinkat = (orig_unlinkat_t)dlsym(RTLD_NEXT, "unlinkat");
+-
+-	int rv = orig_unlinkat(dirfd, pathname, flags);
+-	tprintf(ftty, "%u:%s:unlinkat %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, int dirfd, const char *pathname, int flags);
++	int rv = real(dirfd, pathname, flags);
++	if (rv == -1)
++		message("%s %d %s %d:%d (errno=%d)", __func__, dirfd, pathname, flags, rv, errno);
++	else if (verbose)
++		message("%s %d %s %d:%d", __func__, dirfd, pathname, flags, rv);
+ 	return rv;
+ }
+ 
+ // mkdir/mkdirat/rmdir
+-typedef int (*orig_mkdir_t)(const char *pathname, mode_t mode);
+-static orig_mkdir_t orig_mkdir = NULL;
+ int mkdir(const char *pathname, mode_t mode) {
+-	if (!orig_mkdir)
+-		orig_mkdir = (orig_mkdir_t)dlsym(RTLD_NEXT, "mkdir");
+-
+-	int rv = orig_mkdir(pathname, mode);
+-	tprintf(ftty, "%u:%s:mkdir %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, const char *pathname, mode_t mode);
++	int rv = real(pathname, mode);
++	if (rv == -1)
++		message("%s %s %#3o:%d (errno=%d)", __func__, pathname, mode, rv, errno);
++	else if (verbose)
++		message("%s %s %#3o:%d", __func__, pathname, mode, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_mkdirat_t)(int dirfd, const char *pathname, mode_t mode);
+-static orig_mkdirat_t orig_mkdirat = NULL;
+ int mkdirat(int dirfd, const char *pathname, mode_t mode) {
+-	if (!orig_mkdirat)
+-		orig_mkdirat = (orig_mkdirat_t)dlsym(RTLD_NEXT, "mkdirat");
+-
+-	int rv = orig_mkdirat(dirfd, pathname, mode);
+-	tprintf(ftty, "%u:%s:mkdirat %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, int dirfd, const char *pathname, mode_t mode);
++	int rv = real(dirfd, pathname, mode);
++	if (rv == -1)
++		message("%s %d %s %#3o:%d (errno=%d)", __func__, dirfd, pathname, mode, rv, errno);
++	else if (verbose)
++		message("%s %d %s %#3o:%d", __func__, dirfd, pathname, mode, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_rmdir_t)(const char *pathname);
+-static orig_rmdir_t orig_rmdir = NULL;
+ int rmdir(const char *pathname) {
+-	if (!orig_rmdir)
+-		orig_rmdir = (orig_rmdir_t)dlsym(RTLD_NEXT, "rmdir");
+-
+-	int rv = orig_rmdir(pathname);
+-	tprintf(ftty, "%u:%s:rmdir %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, const char *pathname);
++	int rv = real(pathname);
++	if (rv == -1)
++		message("%s %s:%d (errno=%d)", __func__, pathname, rv, errno);
++	else if (verbose)
++		message("%s %s:%d", __func__, pathname, rv);
+ 	return rv;
+ }
+ 
+ // stat
+-typedef int (*orig_stat_t)(const char *pathname, struct stat *statbuf);
+-static orig_stat_t orig_stat = NULL;
+ int stat(const char *pathname, struct stat *statbuf) {
+-	if (!orig_stat)
+-		orig_stat = (orig_stat_t)dlsym(RTLD_NEXT, "stat");
+-
+-	int rv = orig_stat(pathname, statbuf);
+-	tprintf(ftty, "%u:%s:stat %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, const char *pathname, struct stat *statbuf);
++	int rv = real(pathname, statbuf);
++	if (rv == -1)
++		message("%s %s %p:%d (errno=%d)", __func__, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %s %p:%d", __func__, pathname, statbuf, rv);
+ 	return rv;
+ }
+ 
+ #ifdef __GLIBC__
+-typedef int (*orig_stat64_t)(const char *pathname, struct stat64 *statbuf);
+-static orig_stat64_t orig_stat64 = NULL;
+ int stat64(const char *pathname, struct stat64 *statbuf) {
+-	if (!orig_stat64)
+-		orig_stat64 = (orig_stat64_t)dlsym(RTLD_NEXT, "stat64");
+-
+-	int rv = orig_stat64(pathname, statbuf);
+-	tprintf(ftty, "%u:%s:stat64 %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, const char *pathname, struct stat64 *statbuf);
++	int rv = real(pathname, statbuf);
++	if (rv == -1)
++		message("%s %s %p:%d (errno=%d)", __func__, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %s %p:%d", __func__, pathname, statbuf, rv);
+ 	return rv;
+ }
+ #endif /* __GLIBC__ */
+ 
+ // lstat
+-typedef int (*orig_lstat_t)(const char *pathname, struct stat *statbuf);
+-static orig_lstat_t orig_lstat = NULL;
+ int lstat(const char *pathname, struct stat *statbuf) {
+-	if (!orig_lstat)
+-		orig_lstat = (orig_lstat_t)dlsym(RTLD_NEXT, "lstat");
+-
+-	int rv = orig_lstat(pathname, statbuf);
+-	tprintf(ftty, "%u:%s:lstat %s:%d\n", mypid, myname, pathname, rv);
++	REAL(int, const char *pathname, struct stat *statbuf);
++	int rv = real(pathname, statbuf);
++	if (rv == -1)
++		message("%s %s %p:%d (errno=%d)", __func__, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %s %p:%d", __func__, pathname, statbuf, rv);
+ 	return rv;
+ }
+ 
+ #ifdef __GLIBC__
+-typedef int (*orig_lstat64_t)(const char *pathname, struct stat64 *statbuf);
+-static orig_lstat64_t orig_lstat64 = NULL;
+ int lstat64(const char *pathname, struct stat64 *statbuf) {
+-	if (!orig_lstat64)
+-		orig_lstat64 = (orig_lstat64_t)dlsym(RTLD_NEXT, "lstat64");
++	REAL(int, const char *pathname, struct stat64 *statbuf);
++	int rv = real(pathname, statbuf);
++	if (rv == -1)
++		message("%s %s %p:%d (errno=%d)", __func__, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %s %p:%d", __func__, pathname, statbuf, rv);
++	return rv;
++}
++#endif /* __GLIBC__ */
+ 
+-	int rv = orig_lstat64(pathname, statbuf);
+-	tprintf(ftty, "%u:%s:lstat64 %s:%d\n", mypid, myname, pathname, rv);
++int fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
++	REAL(int, int dirfd, const char *pathname, struct stat *statbuf, int flags);
++	int rv = real(dirfd, pathname, statbuf, flags);
++	if (rv == -1)
++		message("%s %d %s %p %d:%d (errno=%d)", __func__, dirfd, pathname, statbuf, flags, rv, errno);
++	else if (verbose)
++		message("%s %d %s %p %d:%d", __func__, dirfd, pathname, statbuf, flags, rv);
++	return rv;
++}
++
++#ifdef __GLIBC__
++int fstatat64(int dirfd, const char *pathname, struct stat64 *statbuf, int flags) {
++	REAL(int, int dirfd, const char *pathname, struct stat64 *statbuf, int flags);
++	int rv = real(dirfd, pathname, statbuf, flags);
++	if (rv == -1)
++		message("%s %d %s %p %d:%d (errno=%d)", __func__, dirfd, pathname, statbuf, flags, rv, errno);
++	else if (verbose)
++		message("%s %d %s %p %d:%d", __func__, dirfd, pathname, statbuf, flags, rv);
++	return rv;
++}
++
++int __xstat(int vers, const char *pathname, struct stat *statbuf) {
++	REAL(int, int vers, const char *pathname, struct stat *statbuf);
++	int rv = real(vers, pathname, statbuf);
++	if (rv == -1)
++		message("%s %d %s %p:%d (errno=%d)", __func__, vers, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %d %s %p:%d", __func__, vers, pathname, statbuf, rv);
++	return rv;
++}
++
++int __xstat64(int vers, const char *pathname, struct stat64 *statbuf) {
++	REAL(int, int vers, const char *pathname, struct stat64 *statbuf);
++	int rv = real(vers, pathname, statbuf);
++	if (rv == -1)
++		message("%s %d %s %p:%d (errno=%d)", __func__, vers, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %d %s %p:%d", __func__, vers, pathname, statbuf, rv);
++	return rv;
++}
++
++int __lxstat(int vers, const char *pathname, struct stat *statbuf) {
++	REAL(int, int vers, const char *pathname, struct stat *statbuf);
++	int rv = real(vers, pathname, statbuf);
++	if (rv == -1)
++		message("%s %d %s %p:%d (errno=%d)", __func__, vers, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %d %s %p:%d", __func__, vers, pathname, statbuf, rv);
++	return rv;
++}
++
++int __lxstat64(int vers, const char *pathname, struct stat64 *statbuf) {
++	REAL(int, int vers, const char *pathname, struct stat64 *statbuf);
++	int rv = real(vers, pathname, statbuf);
++	if (rv == -1)
++		message("%s %d %s %p:%d (errno=%d)", __func__, vers, pathname, statbuf, rv, errno);
++	else if (verbose)
++		message("%s %d %s %p:%d", __func__, vers, pathname, statbuf, rv);
++	return rv;
++}
++
++int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *statbuf, int flags) {
++	REAL(int, int vers, int dirfd, const char *pathname, struct stat *statbuf, int flags);
++	int rv = real(vers, dirfd, pathname, statbuf, flags);
++	if (rv == -1)
++		message("%s %d %d %s %p %d:%d (errno=%d)", __func__, vers, dirfd, pathname, statbuf, flags, rv, errno);
++	else if (verbose)
++		message("%s %d %d %s %p %d:%d", __func__, vers, dirfd, pathname, statbuf, flags, rv);
++	return rv;
++}
++
++int __fxstatat64(int vers, int dirfd, const char *pathname, struct stat64 *statbuf, int flags) {
++	REAL(int, int vers, int dirfd, const char *pathname, struct stat64 *statbuf, int flags);
++	int rv = real(vers, dirfd, pathname, statbuf, flags);
++	if (rv == -1)
++		message("%s %d %d %s %p %d:%d (errno=%d)", __func__, vers, dirfd, pathname, statbuf, flags, rv, errno);
++	else if (verbose)
++		message("%s %d %d %s %p %d:%d", __func__, vers, dirfd, pathname, statbuf, flags, rv);
+ 	return rv;
+ }
+ #endif /* __GLIBC__ */
+ 
+ // opendir
+-typedef DIR *(*orig_opendir_t)(const char *pathname);
+-static orig_opendir_t orig_opendir = NULL;
+ DIR *opendir(const char *pathname) {
+-	if (!orig_opendir)
+-		orig_opendir = (orig_opendir_t)dlsym(RTLD_NEXT, "opendir");
+-
+-	DIR *rv = orig_opendir(pathname);
+-	tprintf(ftty, "%u:%s:opendir %s:%p\n", mypid, myname, pathname, rv);
++	REAL(DIR *, const char *pathname);
++	DIR *rv = real(pathname);
++	if (!rv)
++		message("%s %s:%p (errno=%d)", __func__, pathname, rv, errno);
++	else if (verbose)
++		message("%s %s:%p", __func__, pathname, rv);
+ 	return rv;
+ }
+ 
+ // access
++static int silent_access(const char *pathname, int mode) {
++	REAL(int, const char *pathname, int mode);
++	int rv = real(pathname, mode);
++	return rv;
++}
++
+ int access(const char *pathname, int mode) {
+-	if (!orig_access)
+-		orig_access = (orig_access_t)dlsym(RTLD_NEXT, "access");
+-
+-	int rv = orig_access(pathname, mode);
+-	tprintf(ftty, "%u:%s:access %s:%d\n", mypid, myname, pathname, rv);
++	int rv = silent_access(pathname, mode);
++	if (rv == -1)
++		message("%s %s %d:%d (errno=%d)", __func__, pathname, mode, rv, errno);
++	else if (verbose)
++		message("%s %s %d:%d", __func__, pathname, mode, rv);
+ 	return rv;
+ }
+ 
+-
+ // connect
+-typedef int (*orig_connect_t)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+-static orig_connect_t orig_connect = NULL;
+ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+-	if (!orig_connect)
+-		orig_connect = (orig_connect_t)dlsym(RTLD_NEXT, "connect");
+-
+- 	int rv = orig_connect(sockfd, addr, addrlen);
+-	print_sockaddr(sockfd, "connect", addr, rv);
+-
++	REAL(int, int sockfd, const struct sockaddr *addr, socklen_t addrlen);
++	int rv = real(sockfd, addr, addrlen);
++	char buff[256];
++	if (rv == -1)
++		message("%s %d %s:%d (errno=%d)", __func__, sockfd, sockaddr_repr(addr, buff, sizeof buff), rv, errno);
++	else if (verbose)
++		message("%s %d %s:%d", __func__, sockfd, sockaddr_repr(addr, buff, sizeof buff), rv);
+ 	return rv;
+ }
+ 
+ // socket
+-typedef int (*orig_socket_t)(int domain, int type, int protocol);
+-static orig_socket_t orig_socket = NULL;
+-static char socketbuf[1024];
+ int socket(int domain, int type, int protocol) {
+-	if (!orig_socket)
+-		orig_socket = (orig_socket_t)dlsym(RTLD_NEXT, "socket");
+-
+-	int rv = orig_socket(domain, type, protocol);
+-	char *ptr = socketbuf;
+-	ptr += sprintf(ptr, "%u:%s:socket ", mypid, myname);
+-	char *str = translate(socket_domain, domain);
+-	if (str == NULL)
+-		ptr += sprintf(ptr, "%d ", domain);
+-	else
+-		ptr += sprintf(ptr, "%s ", str);
+-
+-	int t = type;	// glibc uses higher bits for various other purposes
+-#ifdef SOCK_CLOEXEC
+-	t &= ~SOCK_CLOEXEC;
+-#endif
+-#ifdef SOCK_NONBLOCK
+-	t &= ~SOCK_NONBLOCK;
+-#endif
+-	str = translate(socket_type, t);
+-	if (str == NULL)
+-		ptr += sprintf(ptr, "%d ", type);
+-	else
+-		ptr += sprintf(ptr, "%s ", str);
+-
+-	if (domain == AF_LOCAL)
+-		sprintf(ptr, "0");
+-	else {
+-		str = translate(socket_protocol, protocol);
+-		if (str == NULL)
+-			sprintf(ptr, "%d", protocol);
+-		else
+-			sprintf(ptr, "%s", str);
+-	}
+-
+-	tprintf(ftty, "%s:%d\n", socketbuf, rv);
++	REAL(int, int domain, int type, int protocol);
++	int rv = real(domain, type, protocol);
++	char buff[256];
++	if (rv == -1)
++		message("%s %s:%d (errno=%d)", __func__, socket_repr(domain, type, protocol, buff, sizeof buff), rv, errno);
++	else if (verbose)
++		message("%s %s:%d", __func__, socket_repr(domain, type, protocol, buff, sizeof buff), rv);
+ 	return rv;
+ }
+ 
+ // bind
+-typedef int (*orig_bind_t)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+-static orig_bind_t orig_bind = NULL;
+ int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+-	if (!orig_bind)
+-		orig_bind = (orig_bind_t)dlsym(RTLD_NEXT, "bind");
+-
+-	int rv = orig_bind(sockfd, addr, addrlen);
+-	print_sockaddr(sockfd, "bind", addr, rv);
+-
++	REAL(int, int sockfd, const struct sockaddr *addr, socklen_t addrlen);
++	int rv = real(sockfd, addr, addrlen);
++	char buff[256];
++	if (rv == -1)
++		message("%s %d %s:%d (errno=%d)", __func__, sockfd, sockaddr_repr(addr, buff, sizeof buff), rv, errno);
++	else if (verbose)
++		message("%s %d %s:%d", __func__, sockfd, sockaddr_repr(addr, buff, sizeof buff), rv);
+ 	return rv;
+ }
+ 
+-#if 0
+-typedef int (*orig_accept_t)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+-static orig_accept_t orig_accept = NULL;
+-int accept(int sockfd, struct sockaddr *addr, socklen_t addrlen) {
+-	if (!orig_accept)
+-		orig_accept = (orig_accept_t)dlsym(RTLD_NEXT, "accept");
+-
+-	int rv = orig_accept(sockfd, addr,  addrlen);
+-	print_sockaddr(sockfd, "accept", addr, rv);
+-
++int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
++	REAL(int, int sockfd, struct sockaddr *addr, socklen_t *addrlen);
++	int rv = real(sockfd, addr, addrlen);
++	char buff[256];
++	if (rv == -1)
++		message("%s %d %s:%d (errno=%d)", __func__, sockfd, "N/A", rv, errno);
++	else if (verbose)
++		message("%s %d %s:%d", __func__, sockfd, sockaddr_repr(addr, buff, sizeof buff), rv);
+ 	return rv;
+ }
+-#endif
+ 
+-typedef int (*orig_system_t)(const char *command);
+-static orig_system_t orig_system = NULL;
+ int system(const char *command) {
+-	if (!orig_system)
+-		orig_system = (orig_system_t)dlsym(RTLD_NEXT, "system");
+-
+-	int rv = orig_system(command);
+-	tprintf(ftty, "%u:%s:system %s:%d\n", mypid, myname, command, rv);
+-
++	REAL(int, const char *command);
++	int rv = real(command);
++	if (rv == -1)
++		message("%s %s:%d (errno=%d)", __func__, command, rv, errno);
++	else if (WIFSIGNALED(rv))
++		message("%s %s:%d (signal=%d%s)", __func__, command, rv, WTERMSIG(rv), WCOREDUMP(rv) ? " coredump" : "");
++	else if (!WIFEXITED(rv))
++		message("%s %s:%d (unexpected status)", __func__, command, rv);
++	else if (verbose || WEXITSTATUS(rv))
++		message("%s %s:%d (exitcode=%d)", __func__, command, rv, WEXITSTATUS(rv));
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setuid_t)(uid_t uid);
+-static orig_setuid_t orig_setuid = NULL;
+ int setuid(uid_t uid) {
+-	if (!orig_setuid)
+-		orig_setuid = (orig_setuid_t)dlsym(RTLD_NEXT, "setuid");
+-
+-	int rv = orig_setuid(uid);
+-	tprintf(ftty, "%u:%s:setuid %d:%d\n", mypid, myname, uid, rv);
+-
++	REAL(int, uid_t uid);
++	int rv = real(uid);
++	if (rv == -1)
++		message("%s %d:%d (errno=%d)", __func__, uid, rv, errno);
++	else if (verbose)
++		message("%s %d:%d", __func__, uid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setgid_t)(gid_t gid);
+-static orig_setgid_t orig_setgid = NULL;
+ int setgid(gid_t gid) {
+-	if (!orig_setgid)
+-		orig_setgid = (orig_setgid_t)dlsym(RTLD_NEXT, "setgid");
+-
+-	int rv = orig_setgid(gid);
+-	tprintf(ftty, "%u:%s:setgid %d:%d\n", mypid, myname, gid, rv);
+-
++	REAL(int, gid_t gid);
++	int rv = real(gid);
++	if (rv == -1)
++		message("%s %d:%d (errno=%d)", __func__, gid, rv, errno);
++	else if (verbose)
++		message("%s %d:%d", __func__, gid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setfsuid_t)(uid_t uid);
+-static orig_setfsuid_t orig_setfsuid = NULL;
+ int setfsuid(uid_t uid) {
+-	if (!orig_setfsuid)
+-		orig_setfsuid = (orig_setfsuid_t)dlsym(RTLD_NEXT, "setfsuid");
+-
+-	int rv = orig_setfsuid(uid);
+-	tprintf(ftty, "%u:%s:setfsuid %d:%d\n", mypid, myname, uid, rv);
+-
++	REAL(int, uid_t uid);
++	int rv = real(uid);
++	// setfsuid() returns previous uid regardless of success/failure
++	message("%s %d:%d", __func__, uid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setfsgid_t)(gid_t gid);
+-static orig_setfsgid_t orig_setfsgid = NULL;
+ int setfsgid(gid_t gid) {
+-	if (!orig_setfsgid)
+-		orig_setfsgid = (orig_setfsgid_t)dlsym(RTLD_NEXT, "setfsgid");
+-
+-	int rv = orig_setfsgid(gid);
+-	tprintf(ftty, "%u:%s:setfsgid %d:%d\n", mypid, myname, gid, rv);
+-
++	REAL(int, gid_t gid);
++	int rv = real(gid);
++	// setfsgid() returns previous gid regardless of success/failure
++	message("%s %d:%d", __func__, gid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setreuid_t)(uid_t ruid, uid_t euid);
+-static orig_setreuid_t orig_setreuid = NULL;
+ int setreuid(uid_t ruid, uid_t euid) {
+-	if (!orig_setreuid)
+-		orig_setreuid = (orig_setreuid_t)dlsym(RTLD_NEXT, "setreuid");
+-
+-	int rv = orig_setreuid(ruid, euid);
+-	tprintf(ftty, "%u:%s:setreuid %d %d:%d\n", mypid, myname, ruid, euid, rv);
+-
++	REAL(int, uid_t ruid, uid_t euid);
++	int rv = real(ruid, euid);
++	if (rv == -1)
++		message("%s %d %d:%d (errno=%d)", __func__, ruid, euid, rv, errno);
++	else if (verbose)
++		message("%s %d %d:%d", __func__, ruid, euid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setregid_t)(gid_t rgid, gid_t egid);
+-static orig_setregid_t orig_setregid = NULL;
+ int setregid(gid_t rgid, gid_t egid) {
+-	if (!orig_setregid)
+-		orig_setregid = (orig_setregid_t)dlsym(RTLD_NEXT, "setregid");
+-
+-	int rv = orig_setregid(rgid, egid);
+-	tprintf(ftty, "%u:%s:setregid %d %d:%d\n", mypid, myname, rgid, egid, rv);
+-
++	REAL(int, gid_t rgid, gid_t egid);
++	int rv = real(rgid, egid);
++	if (rv == -1)
++		message("%s %d %d:%d (errno=%d)", __func__, rgid, egid, rv, errno);
++	else if (verbose)
++		message("%s %d %d:%d", __func__, rgid, egid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setresuid_t)(uid_t ruid, uid_t euid, uid_t suid);
+-static orig_setresuid_t orig_setresuid = NULL;
+ int setresuid(uid_t ruid, uid_t euid, uid_t suid) {
+-	if (!orig_setresuid)
+-		orig_setresuid = (orig_setresuid_t)dlsym(RTLD_NEXT, "setresuid");
+-
+-	int rv = orig_setresuid(ruid, euid, suid);
+-	tprintf(ftty, "%u:%s:setresuid %d %d %d:%d\n", mypid, myname, ruid, euid, suid, rv);
+-
++	REAL(int, uid_t ruid, uid_t euid, uid_t suid);
++	int rv = real(ruid, euid, suid);
++	if (rv == -1)
++		message("%s %d %d %d:%d (errno=%d)", __func__, ruid, euid, suid, rv, errno);
++	else if (verbose)
++		message("%s %d %d %d:%d", __func__, ruid, euid, suid, rv);
+ 	return rv;
+ }
+ 
+-typedef int (*orig_setresgid_t)(gid_t rgid, gid_t egid, gid_t sgid);
+-static orig_setresgid_t orig_setresgid = NULL;
+ int setresgid(gid_t rgid, gid_t egid, gid_t sgid) {
+-	if (!orig_setresgid)
+-		orig_setresgid = (orig_setresgid_t)dlsym(RTLD_NEXT, "setresgid");
+-
+-	int rv = orig_setresgid(rgid, egid, sgid);
+-	tprintf(ftty, "%u:%s:setresgid %d %d %d:%d\n", mypid, myname, rgid, egid, sgid, rv);
+-
++	REAL(int, gid_t rgid, gid_t egid, gid_t sgid);
++	int rv = real(rgid, egid, sgid);
++	if (rv == -1)
++		message("%s %d %d %d:%d (errno=%d)", __func__, rgid, egid, sgid, rv, errno);
++	else if (verbose)
++		message("%s %d %d %d:%d", __func__, rgid, egid, sgid, rv);
+ 	return rv;
+ }
+ 
++//
++// library constructor/destructor
++//
++// Using fprintf to /dev/tty instead of printf in order to fix #561
++__attribute__((constructor)) static void init(void) {
++	if (!output())
++		exit(EXIT_FAILURE);
++	message("=== tracelib init() === ");
++}
++
++__attribute__((destructor)) static void fini(void) {
++	message("=== tracelib fini() === ");
++	if (ftty) {
++		fclose(ftty);
++		ftty = NULL;
++	}
++}
++
+ // every time a new process is started, this gets called
+ // it can be used to build things like private-bin
+-__attribute__((constructor))
+-static void log_exec(int argc, char** argv) {
+-	(void) argc;
+-	(void) argv;
++__attribute__((constructor)) static void log_exec(void) {
+ 	static char buf[PATH_MAX + 1];
+ 	int rv = readlink("/proc/self/exe", buf, PATH_MAX);
+ 	if (rv != -1) {
+-		buf[rv] = '\0';	// readlink does not add a '\0' at the end
+-		tprintf(ftty, "%u:%s:exec %s:0\n", mypid, myname, buf);
++		buf[rv] = '\0'; // readlink does not add a '\0' at the end
++		message("exec %s:0", buf);
+ 	}
+ }
++
++//
++// Determining output file
++//
++// As we are tracing relatively low level functions, it is possible that
++// there are things to log before library constructors are called. Thus:
++// - open the log file on demand, but make only one attempt at it
++// - verify in init() that logfile could be opened
++// - callers need to expect that output() can return NULL file
++static FILE *output(void) {
++	if (!mypid) {
++		// pid
++		mypid = getpid();
++
++		// NB if below code happens to cause recursive logging
++		//    before 'ftty' is set, message() writes to stderr
++
++		// Optionally: log only failing calls when
++		// environment has FIREJAIL_VERBOSE_TRACE=no
++		const char *env = getenv("FIREJAIL_VERBOSE_TRACE");
++		verbose = (!env || *env != 'n');
++
++		// process name
++		FILE *fp = silent_fopen("/proc/self/comm", "r");
++		if (fp) {
++			if (fgets(myname, MAXNAME, fp) == NULL)
++				strcpy(myname, "unknown");
++			else
++				myname[strcspn(myname, "\n")] = 0;
++			fclose(fp);
++		}
++
++		// allow environment variable to override defaults
++		char *logfile = getenv("FIREJAIL_TRACEFILE");
++		if (!logfile) {
++			// if exists, log to trace file
++			logfile = RUN_TRACE_FILE;
++			if (silent_access(logfile, F_OK)) {
++				// else log to associated tty
++				logfile = "/dev/tty";
++			}
++		}
++
++		// logfile
++		if (!(ftty = silent_fopen(logfile, "a"))) {
++			fprintf(stderr, "Cannot open trace log file '%s': %s\n",
++				logfile, strerror(errno));
++		}
++		else {
++			// line buffered stream
++			setvbuf(ftty, NULL, _IOLBF, BUFSIZ);
++		}
++	}
++	return ftty;
++}
+-- 
+2.17.1
+

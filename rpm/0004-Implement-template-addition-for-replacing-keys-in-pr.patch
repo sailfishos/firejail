@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jussi Laakkonen <jussi.laakkonen@jolla.com>
 Date: Fri, 7 May 2021 18:29:29 +0300
-Subject: [PATCH] Implement template addition for replacing keys in profile
- files
+Subject: [PATCH] Implement template addition for replacing keys in profile files
 
 Implement template addition to pass templates as key value pairs as cmd
 line parameters to replace the keys in read profile file lines to allow
@@ -78,7 +77,7 @@ addition.
  create mode 100644 src/firejail/template.c
 
 diff --git a/src/firejail/dbus.c b/src/firejail/dbus.c
-index 9a4cb2e6..80385376 100644
+index 66738bd4b..8160bc6be 100644
 --- a/src/firejail/dbus.c
 +++ b/src/firejail/dbus.c
 @@ -41,7 +41,7 @@
@@ -91,11 +90,11 @@ index 9a4cb2e6..80385376 100644
  
  static pid_t dbus_proxy_pid = 0;
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index 28c1d81e..77e5a830 100644
+index 4848c3516..c245e40e6 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
-@@ -888,6 +888,8 @@ void set_x11_run_file(pid_t pid, int display);
- void set_profile_run_file(pid_t pid, const char *fname);
+@@ -922,6 +922,8 @@ void set_sandbox_run_file(pid_t pid, pid_t child);
+ void release_sandbox_lock(void);
  
  // dbus.c
 +#define DBUS_MAX_NAME_LENGTH 255
@@ -103,9 +102,9 @@ index 28c1d81e..77e5a830 100644
  int dbus_check_name(const char *name);
  int dbus_check_call_rule(const char *name);
  void dbus_check_profile(void);
-@@ -906,4 +908,10 @@ void dhcp_start(void);
- // selinux.c
- void selinux_relabel_path(const char *path, const char *inside_path);
+@@ -946,4 +948,10 @@ void run_ids(int argc, char **argv);
+ // oom.c
+ void oom_set(const char *oom_string);
  
 +// template.c
 +void check_template(char *arg);
@@ -115,10 +114,10 @@ index 28c1d81e..77e5a830 100644
 +void template_cleanup();
  #endif
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 5d92df2d..252371be 100644
+index 6bebf3143..3edfbb09a 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
-@@ -2649,6 +2649,11 @@ int main(int argc, char **argv, char **envp) {
+@@ -2764,6 +2764,11 @@ int main(int argc, char **argv, char **envp) {
  				exit_err_feature("networking");
  		}
  #endif
@@ -130,7 +129,7 @@ index 5d92df2d..252371be 100644
  		//*************************************
  		// command
  		//*************************************
-@@ -2762,6 +2767,9 @@ int main(int argc, char **argv, char **envp) {
+@@ -2847,6 +2852,9 @@ int main(int argc, char **argv, char **envp) {
  		}
  	}
  
@@ -140,7 +139,7 @@ index 5d92df2d..252371be 100644
  	profile_read_file_list();
  
  	EUID_ASSERT();
-@@ -2893,6 +2901,9 @@ int main(int argc, char **argv, char **envp) {
+@@ -2972,6 +2980,9 @@ int main(int argc, char **argv, char **envp) {
  	}
  	EUID_ASSERT();
  
@@ -151,10 +150,10 @@ index 5d92df2d..252371be 100644
  	if (arg_x11_block)
  		x11_block();
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index 2c172ad1..9f0e5baf 100644
+index 4ca9bc2cd..55b11eb50 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1812,6 +1812,40 @@ void profile_read(const char *fname) {
+@@ -1868,6 +1868,40 @@ void profile_read(const char *fname) {
  			msg_printed = 1;
  		}
  
@@ -197,7 +196,7 @@ index 2c172ad1..9f0e5baf 100644
  			include_level++;
 diff --git a/src/firejail/template.c b/src/firejail/template.c
 new file mode 100644
-index 00000000..64bcef5e
+index 000000000..64bcef5e4
 --- /dev/null
 +++ b/src/firejail/template.c
 @@ -0,0 +1,504 @@
@@ -706,22 +705,22 @@ index 00000000..64bcef5e
 +	return new_string;
 +}
 diff --git a/src/firejail/usage.c b/src/firejail/usage.c
-index 098bf696..4598f3c7 100644
+index 5b376dc3c..00af44687 100644
 --- a/src/firejail/usage.c
 +++ b/src/firejail/usage.c
-@@ -239,6 +239,7 @@ static char *usage_str =
- 	"    --shell=none - run the program directly without a user shell.\n"
- 	"    --shell=program - set default user shell.\n"
+@@ -256,6 +256,7 @@ static char *usage_str =
  	"    --shutdown=name|pid - shutdown the sandbox identified by name or PID.\n"
+ 	"    --tab - enable shell tab completion in sandboxes using private or\n"
+ 	"\twhitelisted home directories.\n"
 +	"    --template=KEY:VALUE - set a template KEY with VALUE usable as ${KEY} in profiles\n"
  	"    --timeout=hh:mm:ss - kill the sandbox automatically after the time\n"
  	"\thas elapsed.\n"
  	"    --tmpfs=dirname - mount a tmpfs filesystem on directory dirname.\n"
 diff --git a/src/man/firejail-profile.txt b/src/man/firejail-profile.txt
-index db58e091..b0ff631b 100644
+index 5b16179ac..5544b471f 100644
 --- a/src/man/firejail-profile.txt
 +++ b/src/man/firejail-profile.txt
-@@ -965,6 +965,20 @@ Always exit firejail with the first child's exit status. The default behavior is
+@@ -1013,6 +1013,20 @@ Always shut down the sandbox after the first child has terminated. The default b
  Join the sandbox identified by name or start a new one.
  Same as "firejail --join=sandboxname" command if sandbox with specified name exists, otherwise same as "name sandboxname".
  
@@ -743,12 +742,12 @@ index db58e091..b0ff631b 100644
  .TP
  \fB/etc/firejail/appname.profile
 diff --git a/src/man/firejail.txt b/src/man/firejail.txt
-index 0462705c..d6036605 100644
+index e5020e37e..1d9e9b16a 100644
 --- a/src/man/firejail.txt
 +++ b/src/man/firejail.txt
-@@ -2573,6 +2573,23 @@ $ firejail \-\-list
+@@ -2870,6 +2870,23 @@ Enable shell tab completion in sandboxes using private or whitelisted home direc
  .br
- $ firejail \-\-shutdown=3272
+ $ firejail \-\-private --tab
  .TP
 +\fB\-\-template=KEY:VALUE
 +Define a template \fBKEY\fR with \fBVALUE\fR to have application specific \fB${KEY}\fRs in the profile files replaced with the given value. This is useful, for example, with D-Bus name ownership to make a generic ownership rule to be application specific. See \fB\&\flfirejail-profile\fR\|(5)\fR for information on how to use the template keys in profile files. Internal macros cannot be overridden with this, in such case firejail quits with an error message.
@@ -770,6 +769,3 @@ index 0462705c..d6036605 100644
  \fB\-\-timeout=hh:mm:ss
  Kill the sandbox automatically after the time has elapsed. The time is specified in hours/minutes/seconds format.
  .br
--- 
-2.31.1
-

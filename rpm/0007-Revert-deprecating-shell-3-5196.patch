@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Daniel Suni <daniel.suni@jolla.com>
+Date: Fri, 17 Feb 2023 11:48:56 +0200
+Subject: [PATCH] Revert "deprecating --shell (3) (#5196)"
+
+This reverts commit 7ad735deafa80114a17b20790de63f7e973b1bb4.
+
+This commit makes firejail attempt to use /bin/bash to launch every process
+that uses a "--" argument. Sailjail uses this, but we do *not* want shell
+execution, since it will fail.
+
+There are a number of bug reports in firejail upstream with regards to this
+very odd feature - see e.g. https://github.com/netblue30/firejail/issues/5659
+so for now we will revert the offending commit until the dust settles upstream.
+---
+ src/firejail/sandbox.c  | 6 +++---
+ test/filters/noroot.exp | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
+index 0377293de..2a3934807 100644
+--- a/src/firejail/sandbox.c
++++ b/src/firejail/sandbox.c
+@@ -537,7 +537,7 @@ void start_application(int no_sandbox, int fd, char *set_sandbox_status) {
+ 	//****************************************
+ 	// start the program without using a shell
+ 	//****************************************
+-	else if (!arg_appimage && !arg_doubledash) {
++	else if (!arg_appimage) {
+ 		if (arg_debug) {
+ 			int i;
+ 			for (i = cfg.original_program_index; i < cfg.original_argc; i++) {
+@@ -569,9 +569,9 @@ void start_application(int no_sandbox, int fd, char *set_sandbox_status) {
+ 		execvp(cfg.original_argv[cfg.original_program_index], &cfg.original_argv[cfg.original_program_index]);
+ 	}
+ 	//****************************************
+-	// start the program using a shell
++	// start the program using a shell (appimages)
+ 	//****************************************
+-	else { // appimage or double-dash
++	else { // appimage
+ 		char *arg[5];
+ 		int index = 0;
+ 		assert(cfg.usershell);
+diff --git a/test/filters/noroot.exp b/test/filters/noroot.exp
+index 942aedbcb..66e1e4e27 100755
+--- a/test/filters/noroot.exp
++++ b/test/filters/noroot.exp
+@@ -81,11 +81,11 @@ spawn $env(SHELL)
+ send -- "firejail --debug --join=test\r"
+ expect {
+ 	timeout {puts "TESTING ERROR 13\n";exit}
+-	"Joining user namespace"
++	"User namespace detected"
+ }
+ expect {
+ 	timeout {puts "TESTING ERROR 14\n";exit}
+-	"Child process initialized"
++	"Joining user namespace"
+ }
+ sleep 1
+ 

@@ -30,22 +30,22 @@ get_user_id() function.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
 ---
- src/firejail/firejail.h   |   5 +-
+ src/firejail/firejail.h   |   4 +
  src/firejail/macros.c     |   9 +++
- src/firejail/main.c       | 112 +++++++++++++++++++++-----------------
- src/firejail/profile.c    |  31 +++++++++++
- src/firejail/sandbox.c    |  76 ++++++++++++++++++++++++++
+ src/firejail/main.c       | 161 +++++++++++++++-----------------------
+ src/firejail/profile.c    |  31 ++++++++
+ src/firejail/sandbox.c    |  76 ++++++++++++++++++
  src/firejail/usage.c      |   1 +
- src/firejail/util.c       |  23 +++++---
- src/include/euid_common.h |  86 ++++++++++++++++++++++-------
+ src/firejail/util.c       |  27 ++++++-
+ src/include/euid_common.h |  86 +++++++++++++++-----
  src/include/rundefs.h     |   1 +
- 9 files changed, 266 insertions(+), 78 deletions(-)
+ 9 files changed, 277 insertions(+), 119 deletions(-)
 
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index 9971d30b..1ea82329 100644
+index 13ee573ad..e922e9593 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
-@@ -163,6 +163,7 @@ typedef struct config_t {
+@@ -168,6 +168,7 @@ typedef struct config_t {
  	char *home_private_keep;	// keep list for private home directory
  	char *etc_private_keep;	// keep list for private etc directory
  	char *opt_private_keep;	// keep list for private opt directory
@@ -53,7 +53,7 @@ index 9971d30b..1ea82329 100644
  	char *srv_private_keep;	// keep list for private srv directory
  	char *bin_private_keep;	// keep list for private bin directory
  	char *bin_private_lib;	// executable list sent by private-bin to private-lib
-@@ -455,6 +456,7 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
+@@ -466,6 +467,7 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
  // add a profile entry in cfg.profile list; use str to populate the list
  void profile_add(char *str);
  void profile_add_ignore(const char *str);
@@ -61,21 +61,19 @@ index 9971d30b..1ea82329 100644
  char *profile_list_normalize(char *list);
  char *profile_list_compress(char *list);
  void profile_list_augment(char **list, const char *items);
-@@ -527,7 +529,8 @@ void update_map(char *mapping, char *map_file);
- void wait_for_other(int fd);
+@@ -560,6 +562,7 @@ void wait_for_other(int fd);
  void notify_other(int fd);
  uid_t pid_get_uid(pid_t pid);
--uid_t get_group_id(const char *group);
-+gid_t get_group_id(const char *group);
+ gid_t get_group_id(const char *groupname);
 +uid_t get_user_id(const char *user);
- int remove_overlay_directory(void);
  void flush_stdin(void);
  int create_empty_dir_as_user(const char *dir, mode_t mode);
+ void create_empty_dir_as_root(const char *dir, mode_t mode);
 diff --git a/src/firejail/macros.c b/src/firejail/macros.c
-index cd29d8f8..895ec93a 100644
+index 3f9460041..ac42a77ed 100644
 --- a/src/firejail/macros.c
 +++ b/src/firejail/macros.c
-@@ -241,6 +241,13 @@ char *expand_macros(const char *path) {
+@@ -243,6 +243,13 @@ char *expand_macros(const char *path) {
  			EUID_ROOT();
  		return new_name;
  	}
@@ -89,7 +87,7 @@ index cd29d8f8..895ec93a 100644
  	else {
  		char *directory = resolve_macro(path);
  		if (directory) {
-@@ -296,6 +303,8 @@ void invalid_filename(const char *fname, int globbing) {
+@@ -276,6 +283,8 @@ void invalid_filename(const char *fname, int globbing) {
  		ptr = fname + 7;
  	else if (strncmp(ptr, "${RUNUSER}", 10) == 0)
  		ptr = fname + 10;
@@ -99,10 +97,10 @@ index cd29d8f8..895ec93a 100644
  		int id = macro_id(fname);
  		if (id != -1)
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 7a0d5283..d42791fc 100644
+index 18e9ae651..129fa9d72 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
-@@ -54,8 +54,7 @@ int __clone2(int (*fn)(void *),
+@@ -55,8 +55,7 @@ int __clone2(int (*fn)(void *),
                /* pid_t *ptid, struct user_desc *tls, pid_t *ctid */ );
  #endif
  
@@ -112,16 +110,16 @@ index 7a0d5283..d42791fc 100644
  
  #define STACK_SIZE (1024 * 1024)
  #define STACK_ALIGNMENT 16
-@@ -1000,7 +999,7 @@ int main(int argc, char **argv, char **envp) {
- 	fix_std_streams();
+@@ -1061,7 +1060,7 @@ int main(int argc, char **argv, char **envp) {
+ 	orig_umask = umask(022);
  
  	// drop permissions by default and rise them when required
 -	EUID_INIT();
 +	EUID_INIT(*argv);
  	EUID_USER();
  
- 	// argument count should be larger than 0
-@@ -2006,6 +2005,12 @@ int main(int argc, char **argv, char **envp) {
+ 	// check standard streams before opening any file
+@@ -2083,6 +2082,12 @@ int main(int argc, char **argv, char **envp) {
  			else
  				exit_err_feature("private-opt");
  		}
@@ -134,14 +132,14 @@ index 7a0d5283..d42791fc 100644
  		else if (strncmp(argv[i], "--private-srv=", 14) == 0) {
  			if (checkcfg(CFG_PRIVATE_SRV)) {
  				// extract private srv list
-@@ -3061,71 +3066,76 @@ int main(int argc, char **argv, char **envp) {
+@@ -3143,124 +3148,88 @@ int main(int argc, char **argv, char **envp) {
  
-  	if (arg_noroot) {
- 	 	// update the UID and GID maps in the new child user namespace
+ 	if (arg_noroot) {
+ 		// update the UID and GID maps in the new child user namespace
 -		// uid
--	 	char *map_path;
--	 	if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
--	 		errExit("asprintf");
+-		char *map_path;
+-		if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
+-			errExit("asprintf");
 +		/* NB: In Linux 4.14 and earlier, id mapping data can have at
 +		 *     maximum 5 lines - see user_namespaces (7) for details. */
 +		const int id_max = 5;
@@ -166,10 +164,7 @@ index 7a0d5283..d42791fc 100644
 +				}
 +			}
 +		}
- 
--	 	char *map;
--	 	uid_t uid = getuid();
--	 	if (asprintf(&map, "%d %d 1", uid, uid) == -1)
++
 +		auto char *id_map(void) {
 +			char *ptr = map_data;
 +			for (int i = 0; i < id_cnt; ++i) {
@@ -180,90 +175,151 @@ index 7a0d5283..d42791fc 100644
 +			id_cnt = 0;
 +			return map_data;
 +		}
-+
+ 
+-		char *map;
+-		uid_t uid = getuid();
+-		if (asprintf(&map, "%d %d 1", uid, uid) == -1)
 +		// UIDs
 +		if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
- 	 		errExit("asprintf");
-- 		EUID_ROOT();
--	 	update_map(map, map_path);
+ 			errExit("asprintf");
 +		id_add(0);
 +		id_add(euid_data.uid);
 +		id_add(euid_data.privileged_uid);
-+		EUID_ROOT();
+ 		EUID_ROOT();
+-		update_map(map, map_path);
 +		update_map(id_map(), map_path);
- 	 	EUID_USER();
--	 	free(map);
- 	 	free(map_path);
+ 		EUID_USER();
+-		free(map);
+ 		free(map_path);
  
--	 	// gid file
+-		// gid file
 +		// GIDs
  		if (asprintf(&map_path, "/proc/%d/gid_map", child) == -1)
  			errExit("asprintf");
--	 	char gidmap[1024];
--	 	char *ptr = gidmap;
--	 	*ptr = '\0';
+-		char gidmap[1024];
+-		char *ptr = gidmap;
+-		*ptr = '\0';
 -
--	 	// add user group
--	 	gid_t gid = getgid();
--	 	sprintf(ptr, "%d %d 1\n", gid, gid);
--	 	ptr += strlen(ptr);
+-		// add user group
+-		gid_t gid = getgid();
+-		sprintf(ptr, "%d %d 1\n", gid, gid);
+-		ptr += strlen(ptr);
  
+-		gid_t g;
 +		id_add(0);
 +		id_add(euid_data.gid);
 +		id_add(euid_data.primary_gid);
 +		id_add(euid_data.privileged_gid);
- 	 	if (!arg_nogroups) {
- 		 	//  add firejail group
--		 	gid_t g = get_group_id("firejail");
--		 	if (g) {
--		 		sprintf(ptr, "%d %d 1\n", g, g);
--		 		ptr += strlen(ptr);
--		 	}
+ 		if (!arg_nogroups || !check_can_drop_all_groups()) {
+ 			// add audio group
+ 			if (!arg_nosound) {
+-				g = get_group_id("audio");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
++				id_add(get_group_id("audio"));
+ 			}
 -
+ 			// add video group
+ 			if (!arg_novideo) {
+-				g = get_group_id("video");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
++				id_add(get_group_id("video"));
+ 			}
++			// We don't use the groups render/vglusers, cdrom/optical
++			// or lp (printers). See JB#59121 for details.
+-
+-			// add render/vglusers group
+-			if (!arg_no3d) {
+-				g = get_group_id("render");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
+-				g = get_group_id("vglusers");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
+-			}
+-
+-			// add lp group
+-			if (!arg_noprinters) {
+-				g = get_group_id("lp");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
+-			}
+-
+-			// add cdrom/optical groups
+-			if (!arg_nodvd) {
+-				g = get_group_id("cdrom");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
+-				g = get_group_id("optical");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
+-			}
+-
+ 			// add input group
+ 			if (!arg_noinput) {
+-				g = get_group_id("input");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
++				id_add(get_group_id("input"));
+ 			}
+ 		}
+-
+ 		if (!arg_nogroups) {
+-			// add firejail group
+-			g = get_group_id("firejail");
+-			if (g) {
+-				sprintf(ptr, "%d %d 1\n", g, g);
+-				ptr += strlen(ptr);
+-			}
+-
+-			// add tty group
+-			g = get_group_id("tty");
+-			if (g) {
+-				sprintf(ptr, "%d %d 1\n", g, g);
+-				ptr += strlen(ptr);
+-			}
+-
+-			// add games group
+-			g = get_group_id("games");
+-			if (g) {
+-				sprintf(ptr, "%d %d 1\n", g, g);
+-			}
++			//  add firejail group
 +			id_add(get_group_id("firejail"));
- 		 	//  add tty group
--		 	g = get_group_id("tty");
--		 	if (g) {
--		 		sprintf(ptr, "%d %d 1\n", g, g);
--		 		ptr += strlen(ptr);
--		 	}
--
++			//  add tty group
 +			id_add(get_group_id("tty"));
- 		 	//  add audio group
--		 	g = get_group_id("audio");
--		 	if (g) {
--		 		sprintf(ptr, "%d %d 1\n", g, g);
--		 		ptr += strlen(ptr);
--		 	}
--
-+			id_add(get_group_id("audio"));
- 		 	//  add video group
--		 	g = get_group_id("video");
--		 	if (g) {
--		 		sprintf(ptr, "%d %d 1\n", g, g);
--		 		ptr += strlen(ptr);
--		 	}
--
-+			id_add(get_group_id("video"));
- 		 	//  add games group
--		 	g = get_group_id("games");
--		 	if (g) {
--		 		sprintf(ptr, "%d %d 1\n", g, g);
--		 	}
++			//  add games group
 +			id_add(get_group_id("games"));
- 		 }
+ 		}
  
-  		EUID_ROOT();
--	 	update_map(gidmap, map_path);
+ 		EUID_ROOT();
+-		update_map(gidmap, map_path);
 +		update_map(id_map(), map_path);
- 	 	EUID_USER();
- 	 	free(map_path);
-  	}
+ 		EUID_USER();
+ 		free(map_path);
+ 	}
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index e52bdc6e..2c226168 100644
+index acf206da6..c5dd43521 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1311,6 +1311,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
+@@ -1382,6 +1382,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
  		return 0;
  	}
  
@@ -279,7 +335,7 @@ index e52bdc6e..2c226168 100644
  	// private /srv list of files and directories
  	if (strncmp(ptr, "private-srv ", 12) == 0) {
  		if (checkcfg(CFG_PRIVATE_SRV)) {
-@@ -1808,6 +1817,28 @@ void profile_read(const char *fname) {
+@@ -1864,6 +1873,28 @@ void profile_read(const char *fname) {
  	fclose(fp);
  }
  
@@ -309,10 +365,10 @@ index e52bdc6e..2c226168 100644
  {
  	/* Remove redundant commas.
 diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
-index fd359c39..5c1676dc 100644
+index 77fe73174..0377293de 100644
 --- a/src/firejail/sandbox.c
 +++ b/src/firejail/sandbox.c
-@@ -860,6 +860,82 @@ int sandbox(void* sandbox_arg) {
+@@ -912,6 +912,82 @@ int sandbox(void* sandbox_arg) {
  	if (arg_private_dev)
  		fs_private_dev();
  
@@ -396,31 +452,31 @@ index fd359c39..5c1676dc 100644
  		if (cfg.chrootdir)
  			fwarning("private-opt feature is disabled in chroot\n");
 diff --git a/src/firejail/usage.c b/src/firejail/usage.c
-index 888a6ffe..098bf696 100644
+index 0a4c8a483..5b376dc3c 100644
 --- a/src/firejail/usage.c
 +++ b/src/firejail/usage.c
-@@ -195,6 +195,7 @@ static char *usage_str =
+@@ -210,6 +210,7 @@ static char *usage_str =
  	"    --private-cwd=directory - set working directory inside jail.\n"
  	"    --private-opt=file,directory - build a new /opt in a temporary filesystem.\n"
  	"    --private-srv=file,directory - build a new /srv in a temporary filesystem.\n"
 +	"    --privileged-data=directory - whitelist privileged user data directory.\n"
  	"    --profile=filename|profile_name - use a custom profile.\n"
  	"    --profile.print=name|pid - print the name of profile file.\n"
- 	"    --profile-path=directory - use this directory to look for profile files.\n"
+ 	"    --protocol=protocol,protocol,protocol - enable protocol filter.\n"
 diff --git a/src/firejail/util.c b/src/firejail/util.c
-index de31ebdd..110a61da 100644
+index a01290cf2..147e5d22d 100644
 --- a/src/firejail/util.c
 +++ b/src/firejail/util.c
-@@ -132,7 +132,7 @@ static void clean_supplementary_groups(gid_t gid) {
- 	int i = 0;
- 	while (allowed[i]) {
- 		gid_t g = get_group_id(allowed[i]);
--	 	if (g) {
-+		if (g != -1) {
- 			int j;
- 			for (j = 0; j < ngroups; j++) {
- 				if (g == groups[j]) {
-@@ -188,9 +188,9 @@ void drop_privs(int nogroups) {
+@@ -160,7 +160,7 @@
+ 	}
+ 
+ 	gid_t g = get_group_id(groupname);
+-	if (g && find_group(g, groups, ngroups) >= 0) {
++	if (g != INVALID_GID && find_group(g, groups, ngroups) >= 0) {
+ 		new_groups[*new_ngroups] = g;
+ 		(*new_ngroups)++;
+ 	}
+@@ -281,9 +292,9 @@ void drop_privs(int force_nogroups) {
  		clean_supplementary_groups(gid);
  
  	// set uid/gid
@@ -432,7 +488,7 @@ index de31ebdd..110a61da 100644
  		errExit("setresuid");
  }
  
-@@ -851,6 +851,9 @@ void update_map(char *mapping, char *map_file) {
+@@ -871,6 +882,9 @@ void update_map(char *mapping, char *map_file) {
  		if (mapping[j] == ',')
  			mapping[j] = '\n';
  
@@ -442,16 +498,10 @@ index de31ebdd..110a61da 100644
  	fd = open(map_file, O_RDWR|O_CLOEXEC);
  	if (fd == -1) {
  		fprintf(stderr, "Error: cannot open %s: %s\n", map_file, strerror(errno));
-@@ -976,16 +979,22 @@ uid_t pid_get_uid(pid_t pid) {
- 
- 
- 
--uid_t get_group_id(const char *group) {
--	// find tty group id
+@@ -955,11 +969,18 @@ gid_t get_group_id(const char *groupname) {
 -	gid_t gid = 0;
-+gid_t get_group_id(const char *group) {
 +	gid_t gid = INVALID_GID;
- 	struct group *g = getgrnam(group);
+ 	struct group *g = getgrnam(groupname);
  	if (g)
  		gid = g->gr_gid;
 -
@@ -467,10 +517,10 @@ index de31ebdd..110a61da 100644
 +}
 +
  
- static int remove_callback(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
- 	(void) sb;
+ // flush stdin if it is connected to a tty and has input
+ void flush_stdin(void) {
 diff --git a/src/include/euid_common.h b/src/include/euid_common.h
-index 94ae8d24..7e966be5 100644
+index 63352dfaa..29ceaa1bb 100644
 --- a/src/include/euid_common.h
 +++ b/src/include/euid_common.h
 @@ -24,36 +24,84 @@
@@ -578,7 +628,7 @@ index 94ae8d24..7e966be5 100644
  
  #endif
 diff --git a/src/include/rundefs.h b/src/include/rundefs.h
-index 3db750da..59530eb1 100644
+index 079670f10..5aedcb32b 100644
 --- a/src/include/rundefs.h
 +++ b/src/include/rundefs.h
 @@ -45,6 +45,7 @@
@@ -589,6 +639,3 @@ index 3db750da..59530eb1 100644
  #define RUN_SRV_DIR			RUN_MNT_DIR "/srv"
  #define RUN_BIN_DIR			RUN_MNT_DIR "/bin"
  #define RUN_PULSE_DIR			RUN_MNT_DIR "/pulse"
--- 
-2.31.1
-

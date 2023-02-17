@@ -1,4 +1,4 @@
-From 8ad599674872d433f8410e3ebd5f2d6793f431fd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Simo Piiroinen <simo.piiroinen@jolla.com>
 Date: Tue, 19 Oct 2021 11:43:31 +0300
 Subject: [PATCH] Retain symlink chains
@@ -25,11 +25,11 @@ Remove the now unnecessary special case code that was used to rectify
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
 ---
- src/fcopy/main.c | 136 +++++++++++++++++++----------------------------
- 1 file changed, 56 insertions(+), 80 deletions(-)
+ src/fcopy/main.c | 125 +++++++++++++++++++----------------------------
+ 1 file changed, 50 insertions(+), 75 deletions(-)
 
 diff --git a/src/fcopy/main.c b/src/fcopy/main.c
-index 31810de9..a5421500 100644
+index b0b7f7024..c99b56b7e 100644
 --- a/src/fcopy/main.c
 +++ b/src/fcopy/main.c
 @@ -22,6 +22,7 @@
@@ -40,7 +40,7 @@ index 31810de9..a5421500 100644
  
  #include <fcntl.h>
  #ifndef O_PATH
-@@ -180,77 +181,58 @@ static void mkdir_attr(const char *fname, mode_t mode, uid_t uid, gid_t gid) {
+@@ -181,78 +182,58 @@ static void mkdir_attr(const char *fname, mode_t mode, uid_t uid, gid_t gid) {
  	}
  }
  
@@ -48,7 +48,10 @@ index 31810de9..a5421500 100644
 -	assert(target);
 -	char *use_target = 0;
 -	char *proc_pid = 0;
--
++void copy_link(const char *target, const char *linkpath) {
++	int failed = 1;
++	char *linkdata = NULL;
+ 
 -	if (!(use_target = realpath(target, NULL)))
 -		goto done;
 -
@@ -56,53 +59,82 @@ index 31810de9..a5421500 100644
 -	static const char proc[] = "/proc/";
 -	if (strncmp(use_target, proc, sizeof(proc) - 1))
 -		goto done;
--
++	// if the link is already there, don't create it
++	struct stat s;
++	if (lstat(linkpath, &s) == 0)
++		goto success;
+ 
 -	int digit = use_target[sizeof(proc) - 1];
 -	if (digit < '1' || digit > '9')
 -		goto done;
--
++	// read source symlink
++	if (lstat(target, &s) == -1)
++		goto failure;
+ 
 -	// check where /proc/self points to
 -	static const char proc_self[] = "/proc/self";
--	if (!(proc_pid = realpath(proc_self, NULL)))
+-	proc_pid = realpath(proc_self, NULL);
+-	if (proc_pid == NULL)
 -		goto done;
--
++	if (!S_ISLNK(s.st_mode))
++		goto failure;
+ 
 -	// redirect /proc/PID/xxx -> /proc/self/XXX
 -	size_t pfix = strlen(proc_pid);
 -	if (strncmp(use_target, proc_pid, pfix))
 -		goto done;
--
++	ssize_t linksize = s.st_size ? (s.st_size + 1) : PATH_MAX;
++	if (!(linkdata = malloc(linksize)))
++	    goto failure;
+ 
 -	if (use_target[pfix] != 0 && use_target[pfix] != '/')
 -		goto done;
--
++	ssize_t rc = readlink(target, linkdata, linksize);
++	if (rc < 0) {
++		if (!arg_quiet)
++			fprintf(stderr, "Error fcopy: readlink %s failed: %m\n", target);
++		goto failure;
++	}
+ 
 -	char *tmp;
 -	if (asprintf(&tmp, "%s%s", proc_self, use_target + pfix) != -1) {
 -		if (arg_debug)
 -			fprintf(stderr, "SYMLINK %s\n  -->   %s\n", use_target, tmp);
 -		free(use_target);
 -		use_target = tmp;
--	}
++	if (rc >= linksize) {
++		if (!arg_quiet)
++			fprintf(stderr, "Error fcopy: readlink %s buffer overflow\n", target);
++		goto failure;
+ 	}
 -	else
 -		errExit("asprintf");
--
+ 
 -done:
 -	if (proc_pid)
 -		free(proc_pid);
 -	return use_target;
 -}
--
++	linkdata[rc] = 0;
+ 
 -void copy_link(const char *target, const char *linkpath, mode_t mode, uid_t uid, gid_t gid) {
 -	(void) mode;
 -	(void) uid;
 -	(void) gid;
-+void copy_link(const char *target, const char *linkpath) {
-+	int failed = 1;
-+	char *linkdata = NULL;
++	// duplicate at the given path
++	if (symlink(linkdata, linkpath) == -1) {
++		if (!arg_quiet)
++			fprintf(stderr, "Error fcopy: creating %s symlink failed: %m\n", linkpath);
++		goto failure;
++	}
  
- 	// if the link is already there, don't create it
- 	struct stat s;
- 	if (lstat(linkpath, &s) == 0)
+-	// if the link is already there, don't create it
+-	struct stat s;
+-	if (lstat(linkpath, &s) == 0)
 -	       return;
--
++	if (arg_debug)
++		fprintf(stderr, "fcopy: created symlink: %s -> %s\n", linkpath, linkdata);
+ 
 -	char *rp = proc_pid_to_self(target);
 -	if (rp) {
 -		if (symlink(rp, linkpath) == -1) {
@@ -110,61 +142,24 @@ index 31810de9..a5421500 100644
 -			goto errout;
 -		}
 -		free(rp);
-+		goto success;
-+
-+	// read source symlink
-+	if (lstat(target, &s) == -1)
-+		goto failure;
-+
-+	if (!S_ISLNK(s.st_mode))
-+		goto failure;
-+
-+	ssize_t linksize = s.st_size ? (s.st_size + 1) : PATH_MAX;
-+	if (!(linkdata = malloc(linksize)))
-+	    goto failure;
-+
-+	ssize_t rc = readlink(target, linkdata, linksize);
-+	if (rc < 0) {
-+		if (!arg_quiet)
-+			fprintf(stderr, "Error fcopy: readlink %s failed: %m\n", target);
-+		goto failure;
-+	}
-+
-+	if (rc >= linksize) {
-+		if (!arg_quiet)
-+			fprintf(stderr, "Error fcopy: readlink %s buffer overflow\n", target);
-+		goto failure;
- 	}
+-	}
 -	else
 -		goto errout;
- 
--	return;
--errout:
--	if (!arg_quiet)
--		fprintf(stderr, "Warning fcopy: cannot create symbolic link %s\n", target);
-+	linkdata[rc] = 0;
-+
-+	// duplicate at the given path
-+	if (symlink(linkdata, linkpath) == -1) {
-+		if (!arg_quiet)
-+			fprintf(stderr, "Error fcopy: creating %s symlink failed: %m\n", linkpath);
-+		goto failure;
-+	}
-+
-+	if (arg_debug)
-+		fprintf(stderr, "fcopy: created symlink: %s -> %s\n", linkpath, linkdata);
-+
 +success:
 +	failed = 0;
 +failure:
 +	if (failed && !arg_quiet)
 +		fprintf(stderr, "Warning fcopy: cannot create symbolic link %s\n", linkpath);
-+
+ 
+-	return;
+-errout:
+-	if (!arg_quiet)
+-		fprintf(stderr, "Warning fcopy: cannot create symbolic link %s\n", target);
 +	free(linkdata);
  }
  
  
-@@ -310,7 +292,7 @@ static int fs_copydir(const char *infname, const struct stat *st, int ftype, str
+@@ -310,7 +291,7 @@ static int fs_copydir(const char *infname, const struct stat *st, int ftype, str
  		mkdir_attr(outfname, mode, uid, gid);
  	}
  	else if (ftype == FTW_SL) {
@@ -173,7 +168,7 @@ index 31810de9..a5421500 100644
  	}
  out:
  	free(outfname);
-@@ -396,22 +378,16 @@ static void duplicate_file(const char *src, const char *dest, struct stat *s) {
+@@ -396,22 +377,16 @@ static void duplicate_file(const char *src, const char *dest, struct stat *s) {
  static void duplicate_link(const char *src, const char *dest, struct stat *s) {
  	char *rsrc = check(src);		  // we drop the result and use the original name
  	char *rdest = check(dest);
@@ -188,6 +183,9 @@ index 31810de9..a5421500 100644
 -	ptr++;
 -	if (asprintf(&name, "%s/%s", rdest, ptr) == -1)
 -		errExit("asprintf");
+-
+-	// copy
+-	copy_link(rsrc, name, mode, uid, gid);
 +	const char *linkname = strrchr(src, '/');
 +	if (linkname++) {
 +		char *linkpath = NULL;
@@ -197,13 +195,7 @@ index 31810de9..a5421500 100644
 +		free(linkpath);
 +	}
  
--	// copy
--	copy_link(rsrc, name, mode, uid, gid);
--
 -	free(name);
  	free(rsrc);
  	free(rdest);
  }
--- 
-2.17.1
-

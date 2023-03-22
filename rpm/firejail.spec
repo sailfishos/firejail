@@ -1,5 +1,5 @@
 Name: firejail
-Version: 0.9.66
+Version: 0.9.72
 Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+
@@ -11,6 +11,7 @@ Patch3: 0003-Add-profile-files-to-a-list-when-processing-argument.patch
 Patch4: 0004-Implement-template-addition-for-replacing-keys-in-pr.patch
 Patch5: 0005-Retain-symlink-chains.patch
 Patch6: 0006-Add-xstat-tracing-and-optionally-log-only-failing-ca.patch
+Patch7: 0007-Revert-deprecating-shell-3-5196.patch
 
 URL: https://github.com/sailfishos/firejail
 
@@ -54,7 +55,7 @@ rm -rf %{buildroot}%{_datadir}/zsh/site-functions/_firejail
 %defattr(-,root,root,-)
 %attr(4755, -, -) %{_bindir}/%{name}
 %{_bindir}/firemon
-%exclude %{_libdir}/%{name}/firecfg.config
+%exclude %{_sysconfdir}/%{name}/firecfg.config
 %{_libdir}/%{name}
 %dir %{_sysconfdir}/%{name}
 %config %{_sysconfdir}/%{name}/*.config
@@ -64,7 +65,7 @@ rm -rf %{buildroot}%{_datadir}/zsh/site-functions/_firejail
 %files profiles
 %{_bindir}/firecfg
 %{_bindir}/jailcheck
-%{_libdir}/%{name}/firecfg.config
+%{_sysconfdir}/%{name}/firecfg.config
 %exclude %{_sysconfdir}/%{name}/*.config
 %exclude %{_sysconfdir}/%{name}/disable-*.inc
 %exclude %{_sysconfdir}/%{name}/whitelist-*.inc

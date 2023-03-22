@@ -8,7 +8,7 @@ Subject: [PATCH] Preserve process effective group for privileged group support
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/include/euid_common.h b/src/include/euid_common.h
-index 8d8dd95f..94ae8d24 100644
+index f40cbb9de..63352dfaa 100644
 --- a/src/include/euid_common.h
 +++ b/src/include/euid_common.h
 @@ -53,7 +53,7 @@ static inline void EUID_PRINT(void) {
@@ -20,6 +20,3 @@ index 8d8dd95f..94ae8d24 100644
  }
  
  #endif
--- 
-2.31.1
-

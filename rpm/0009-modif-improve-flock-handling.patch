@@ -1,0 +1,209 @@
+From d2a1f0773e7f570d8e2cba2cc0289fde1820277b Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Wed, 17 Apr 2024 17:02:31 -0300
+Subject: [PATCH] modif: improve flock handling
+
+Changes:
+
+* Centralize flock handling in preproc.c
+* Add debug and error logging
+* Abort if anything fails
+
+Co-authored-by: Kelvin M. Klann <kmk3.code@protonmail.com>
+---
+ src/firejail/firejail.h |  4 ++
+ src/firejail/main.c     | 34 +++--------------
+ src/firejail/preproc.c  | 83 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 93 insertions(+), 28 deletions(-)
+
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index 1a8bf1fa9..c7bcf0bac 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -414,6 +414,10 @@ int net_get_mac(const char *ifname, unsigned char mac[6]);
+ void net_config_interface(const char *dev, uint32_t ip, uint32_t mask, int mtu);
+ 
+ // preproc.c
++void preproc_lock_firejail_dir(void);
++void preproc_unlock_firejail_dir(void);
++void preproc_lock_firejail_network_dir(void);
++void preproc_unlock_firejail_network_dir(void);
+ void preproc_build_firejail_dir(void);
+ void preproc_mount_mnt_dir(void);
+ void preproc_clean_run(void);
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 33399a2a8..6832ae745 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -1162,15 +1162,9 @@ int main(int argc, char **argv, char **envp) {
+ 	preproc_build_firejail_dir();
+ 	const char *container_name = env_get("container");
+ 	if (!container_name || strcmp(container_name, "firejail")) {
+-		lockfd_directory = open(RUN_DIRECTORY_LOCK_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, S_IRUSR | S_IWUSR);
+-		if (lockfd_directory != -1) {
+-			int rv = fchown(lockfd_directory, 0, 0);
+-			(void) rv;
+-			flock(lockfd_directory, LOCK_EX);
+-		}
++		preproc_lock_firejail_dir();
+ 		preproc_clean_run();
+-		flock(lockfd_directory, LOCK_UN);
+-		close(lockfd_directory);
++		preproc_unlock_firejail_dir();
+ 	}
+ 
+ 	delete_run_files(getpid());
+@@ -2990,12 +2984,7 @@ int main(int argc, char **argv, char **envp) {
+ 	// check and assign an IP address - for macvlan it will be done again in the sandbox!
+ 	if (any_bridge_configured()) {
+ 		EUID_ROOT();
+-		lockfd_network = open(RUN_NETWORK_LOCK_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, S_IRUSR | S_IWUSR);
+-		if (lockfd_network != -1) {
+-			int rv = fchown(lockfd_network, 0, 0);
+-			(void) rv;
+-			flock(lockfd_network, LOCK_EX);
+-		}
++		preproc_lock_firejail_network_dir();
+ 
+ 		if (cfg.bridge0.configured && cfg.bridge0.arg_ip_none == 0)
+ 			check_network(&cfg.bridge0);
+@@ -3024,21 +3013,13 @@ int main(int argc, char **argv, char **envp) {
+ 
+ 	// set name and x11 run files
+ 	EUID_ROOT();
+-	lockfd_directory = open(RUN_DIRECTORY_LOCK_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, S_IRUSR | S_IWUSR);
+-	if (lockfd_directory != -1) {
+-		int rv = fchown(lockfd_directory, 0, 0);
+-		(void) rv;
+-		flock(lockfd_directory, LOCK_EX);
+-	}
++	preproc_lock_firejail_dir();
+ 	if (cfg.name)
+ 		set_name_run_file(sandbox_pid);
+ 	int display = x11_display();
+ 	if (display > 0)
+ 		set_x11_run_file(sandbox_pid, display);
+-	if (lockfd_directory != -1) {
+-		flock(lockfd_directory, LOCK_UN);
+-		close(lockfd_directory);
+-	}
++	preproc_unlock_firejail_dir();
+ 	EUID_USER();
+ 
+ #ifdef HAVE_DBUSPROXY
+@@ -3271,10 +3252,7 @@ int main(int argc, char **argv, char **envp) {
+ 	close(parent_to_child_fds[1]);
+ 
+ 	EUID_ROOT();
+-	if (lockfd_network != -1) {
+-		flock(lockfd_network, LOCK_UN);
+-		close(lockfd_network);
+-	}
++	preproc_unlock_firejail_network_dir();
+ 	EUID_USER();
+ 
+ 	// lock netfilter firewall
+diff --git a/src/firejail/preproc.c b/src/firejail/preproc.c
+index 44f82681a..cb19fe526 100644
+--- a/src/firejail/preproc.c
++++ b/src/firejail/preproc.c
+@@ -18,13 +18,96 @@
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+ #include "firejail.h"
++#include <sys/file.h>
+ #include <sys/mount.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <dirent.h>
++#include <fcntl.h>
+ 
+ static int tmpfs_mounted = 0;
+ 
++static void preproc_lock_file(const char *path, int *lockfd_ptr) {
++	assert(path != NULL);
++	assert(lockfd_ptr != NULL);
++
++	long pid = (long)getpid();
++	if (arg_debug)
++		fprintf(stderr, "pid=%ld: locking %s ...\n", pid, path);
++
++	if (*lockfd_ptr != -1) {
++		if (arg_debug)
++			fprintf(stderr, "pid=%ld: already locked %s ...\n", pid, path);
++		return;
++	}
++
++	int lockfd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, S_IRUSR | S_IWUSR);
++	if (lockfd == -1) {
++		fprintf(stderr, "Error: cannot create a lockfile at %s\n", path);
++		errExit("open");
++	}
++
++	if (fchown(lockfd, 0, 0) == -1) {
++		fprintf(stderr, "Error: cannot chown root:root %s\n", path);
++		errExit("fchown");
++	}
++
++	if (flock(lockfd, LOCK_EX) == -1) {
++		fprintf(stderr, "Error: cannot lock %s\n", path);
++		errExit("flock");
++	}
++
++	*lockfd_ptr = lockfd;
++	if (arg_debug)
++		fprintf(stderr, "pid=%ld: locked %s\n", pid, path);
++}
++
++static void preproc_unlock_file(const char *path, int *lockfd_ptr) {
++	assert(path != NULL);
++	assert(lockfd_ptr != NULL);
++
++	long pid = (long)getpid();
++	if (arg_debug)
++		fprintf(stderr, "pid=%ld: unlocking %s ...\n", pid, path);
++
++	int lockfd = *lockfd_ptr;
++	if (lockfd == -1) {
++		if (arg_debug)
++			fprintf(stderr, "pid=%ld: already unlocked %s ...\n", pid, path);
++		return;
++	}
++
++	if (flock(lockfd, LOCK_UN) == -1) {
++		fprintf(stderr, "Error: cannot unlock %s\n", path);
++		errExit("flock");
++	}
++
++	if (close(lockfd) == -1) {
++		fprintf(stderr, "Error: cannot close %s\n", path);
++		errExit("close");
++	}
++
++	*lockfd_ptr = -1;
++	if (arg_debug)
++		fprintf(stderr, "pid=%ld: unlocked %s\n", pid, path);
++}
++
++void preproc_lock_firejail_dir(void) {
++	preproc_lock_file(RUN_DIRECTORY_LOCK_FILE, &lockfd_directory);
++}
++
++void preproc_unlock_firejail_dir(void) {
++	preproc_unlock_file(RUN_DIRECTORY_LOCK_FILE, &lockfd_directory);
++}
++
++void preproc_lock_firejail_network_dir(void) {
++	preproc_lock_file(RUN_NETWORK_LOCK_FILE, &lockfd_network);
++}
++
++void preproc_unlock_firejail_network_dir(void) {
++	preproc_unlock_file(RUN_NETWORK_LOCK_FILE, &lockfd_network);
++}
++
+ // build /run/firejail directory
+ void preproc_build_firejail_dir(void) {
+ 	struct stat s;
+-- 
+2.25.1
+

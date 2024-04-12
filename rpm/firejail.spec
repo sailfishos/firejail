@@ -12,6 +12,9 @@ Patch4: 0004-Implement-template-addition-for-replacing-keys-in-pr.patch
 Patch5: 0005-Retain-symlink-chains.patch
 Patch6: 0006-Add-xstat-tracing-and-optionally-log-only-failing-ca.patch
 Patch7: 0007-Revert-deprecating-shell-3-5196.patch
+Patch8: 0008-refactor-make-rundir-lock-variables-global.patch
+Patch9: 0009-modif-improve-flock-handling.patch
+Patch10: 0010-modif-populate-run-firejail-while-holding-flock.patch
 
 URL: https://github.com/sailfishos/firejail
 

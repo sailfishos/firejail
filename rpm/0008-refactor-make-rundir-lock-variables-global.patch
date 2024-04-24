@@ -1,0 +1,49 @@
+From 9ccc64fe71802cf96153285efc00e6c87daa1f3b Mon Sep 17 00:00:00 2001
+From: "Kelvin M. Klann" <kmk3.code@protonmail.com>
+Date: Wed, 17 Apr 2024 12:56:06 -0300
+Subject: [PATCH] refactor: make rundir lock variables global
+
+To enable using them outside of src/firejail/main.c.
+---
+ src/firejail/firejail.h | 2 ++
+ src/firejail/main.c     | 4 ++--
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index 13ee573ad..1a8bf1fa9 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -269,6 +269,8 @@ static inline int any_dhcp(void) {
+   return any_ip_dhcp() || any_ip6_dhcp();
+ }
+ 
++extern int lockfd_directory;
++extern int lockfd_network;
+ extern int arg_private;		// mount private /home
+ extern int arg_private_cache;	// private home/.cache
+ extern int arg_debug;		// print debug messages
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 18e9ae651..33399a2a8 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -63,6 +63,8 @@ gid_t firejail_gid = 0;
+ static char child_stack[STACK_SIZE] __attribute__((aligned(STACK_ALIGNMENT)));		// space for child's stack
+ 
+ Config cfg;					// configuration
++int lockfd_directory = -1;
++int lockfd_network = -1;
+ int arg_private = 0;				// mount private /home and /tmp directoryu
+ int arg_private_cache = 0;		// mount private home/.cache
+ int arg_debug = 0;				// print debug messages
+@@ -1050,8 +1052,6 @@ static int check_postexec(const char *list) {
+ int main(int argc, char **argv, char **envp) {
+ 	int i;
+ 	int prog_index = -1;			  // index in argv where the program command starts
+-	int lockfd_network = -1;
+-	int lockfd_directory = -1;
+ 	int custom_profile = 0;	// custom profile loaded
+ 	int arg_caps_cmdline = 0; 	// caps requested on command line (used to break out of --chroot)
+ 	char **ptr;
+-- 
+2.25.1
+

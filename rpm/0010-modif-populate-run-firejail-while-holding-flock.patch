@@ -1,0 +1,119 @@
+From 8bf4c1582c2d3f4018ab08266ef41063d0e0ffe8 Mon Sep 17 00:00:00 2001
+From: Simo Piiroinen <simo.piiroinen@jolla.com>
+Date: Thu, 4 Apr 2024 14:02:29 +0300
+Subject: [PATCH] modif: populate /run/firejail while holding flock
+
+There are reports of firejail sandboxed applications occasionally
+taking a long time (12 seconds) to start up. When this happens, it
+affects all sandboxed applications until the device is rebooted.
+
+The reason for the slowdown seems to be a timing hazard in the way
+remounts under /run/firejail are handled. This gets triggered when
+multiple firejail processes are launched in parallel as part of user
+session bring up and results in some, dozens, hundreds, or even
+thousands of stray /run/firejail/xxx mounts. The amount of mount
+points then affects every mount operation that is done during sandbox
+filesystem construction.
+
+To stop this from happening, arrange it so that only one firejail
+process at time is inspecting and/or modifying mountpoints under
+/run/firejail by doing:
+
+1. Create /run/firejail directory (without locking)
+2. Create and obtain a lock for /run/firejail/firejail-run.lock
+3. Setup files, directories and mounts under /run/firejail
+4. Release /run/firejail/firejail-run.lock
+---
+ src/firejail/chroot.c   |  5 ++++-
+ src/firejail/firejail.h |  3 ++-
+ src/firejail/main.c     | 10 +++++-----
+ src/firejail/preproc.c  | 13 ++++++++++++-
+ 4 files changed, 23 insertions(+), 8 deletions(-)
+
+diff --git a/src/firejail/chroot.c b/src/firejail/chroot.c
+index 72322221c..267004e92 100644
+--- a/src/firejail/chroot.c
++++ b/src/firejail/chroot.c
+@@ -273,7 +273,10 @@ void fs_chroot(const char *rootdir) {
+ 		errExit("mounting /proc");
+ 
+ 	// create all other /run/firejail files and directories
+-	preproc_build_firejail_dir();
++	preproc_build_firejail_dir_unlocked();
++	preproc_lock_firejail_dir();
++	preproc_build_firejail_dir_locked();
++	preproc_unlock_firejail_dir();
+ 
+ 	// update /var directory in order to support multiple sandboxes running on the same root directory
+ 	//	if (!arg_private_dev)
+diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
+index c7bcf0bac..53401b5c6 100644
+--- a/src/firejail/firejail.h
++++ b/src/firejail/firejail.h
+@@ -418,7 +418,8 @@ void preproc_lock_firejail_dir(void);
+ void preproc_unlock_firejail_dir(void);
+ void preproc_lock_firejail_network_dir(void);
+ void preproc_unlock_firejail_network_dir(void);
+-void preproc_build_firejail_dir(void);
++void preproc_build_firejail_dir_unlocked(void);
++void preproc_build_firejail_dir_locked(void);
+ void preproc_mount_mnt_dir(void);
+ void preproc_clean_run(void);
+ 
+diff --git a/src/firejail/main.c b/src/firejail/main.c
+index 6832ae745..61068bd21 100644
+--- a/src/firejail/main.c
++++ b/src/firejail/main.c
+@@ -1159,13 +1159,13 @@ int main(int argc, char **argv, char **envp) {
+ #endif
+ 
+ 	// build /run/firejail directory structure
+-	preproc_build_firejail_dir();
++	preproc_build_firejail_dir_unlocked();
++	preproc_lock_firejail_dir();
++	preproc_build_firejail_dir_locked();
+ 	const char *container_name = env_get("container");
+-	if (!container_name || strcmp(container_name, "firejail")) {
+-		preproc_lock_firejail_dir();
++	if (!container_name || strcmp(container_name, "firejail"))
+ 		preproc_clean_run();
+-		preproc_unlock_firejail_dir();
+-	}
++	preproc_unlock_firejail_dir();
+ 
+ 	delete_run_files(getpid());
+ 	atexit(clear_atexit);
+diff --git a/src/firejail/preproc.c b/src/firejail/preproc.c
+index cb19fe526..6bbd93ba6 100644
+--- a/src/firejail/preproc.c
++++ b/src/firejail/preproc.c
+@@ -109,7 +109,10 @@ void preproc_unlock_firejail_network_dir(void) {
+ }
+ 
+ // build /run/firejail directory
+-void preproc_build_firejail_dir(void) {
++//
++// Note: This creates the base directory of the rundir lockfile;
++// it should be called before preproc_lock_firejail_dir().
++void preproc_build_firejail_dir_unlocked(void) {
+ 	struct stat s;
+ 
+ 	// CentOS 6 doesn't have /run directory
+@@ -118,6 +121,14 @@ void preproc_build_firejail_dir(void) {
+ 	}
+ 
+ 	create_empty_dir_as_root(RUN_FIREJAIL_DIR, 0755);
++}
++
++// build directory hierarchy under /run/firejail
++//
++// Note: Remounts have timing hazards. This function should
++// only be called after acquiring the directory lock via
++// preproc_lock_firejail_dir().
++void preproc_build_firejail_dir_locked(void) {
+ 	create_empty_dir_as_root(RUN_FIREJAIL_NETWORK_DIR, 0755);
+ 	create_empty_dir_as_root(RUN_FIREJAIL_BANDWIDTH_DIR, 0755);
+ 	create_empty_dir_as_root(RUN_FIREJAIL_NAME_DIR, 0755);
+-- 
+2.25.1
+

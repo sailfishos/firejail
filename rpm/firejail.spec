@@ -15,6 +15,7 @@ Patch7: 0007-Revert-deprecating-shell-3-5196.patch
 Patch8: 0008-refactor-make-rundir-lock-variables-global.patch
 Patch9: 0009-modif-improve-flock-handling.patch
 Patch10: 0010-modif-populate-run-firejail-while-holding-flock.patch
+Patch11: 0011-Revert-new-version-for-NixOS-4887.patch
 
 URL: https://github.com/sailfishos/firejail
 

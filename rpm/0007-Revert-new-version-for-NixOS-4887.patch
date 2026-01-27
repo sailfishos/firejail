@@ -9,16 +9,16 @@ This reverts commit 8c33968747016a8e473719db19f723f310a3a5a3.
  1 file changed, 1 insertion(+), 8 deletions(-)
 
 diff --git a/src/firejail/fs_etc.c b/src/firejail/fs_etc.c
-index aa4d76431..3590436d9 100644
+index 80130f933..148a1b69a 100644
 --- a/src/firejail/fs_etc.c
 +++ b/src/firejail/fs_etc.c
-@@ -168,14 +168,7 @@ static void duplicate(const char *fname, const char *private_dir, const char *pr
- 		errExit("asprintf");
+@@ -285,14 +285,7 @@ static void duplicate(const char *fname, const char *private_dir, const char *pr
  
  	build_dirs(src, dst, strlen(private_dir), strlen(private_run_dir));
--
--	// follow links! this will make a copy of the file or directory pointed by the symlink
+ 
+-	// follow links by default, thus making a copy of the file or directory pointed by the symlink
 -	// this will solve problems such as NixOS #4887
+-	//
 -	// don't follow links to dynamic directories such as /proc
 -	if (strcmp(src, "/etc/mtab") == 0)
 -		sbox_run(SBOX_ROOT | SBOX_SECCOMP, 3, PATH_FCOPY, src, dst);
@@ -28,6 +28,3 @@ index aa4d76431..3590436d9 100644
  
  	free(dst);
  	fs_logger2("clone", src);
--- 
-2.25.1
-

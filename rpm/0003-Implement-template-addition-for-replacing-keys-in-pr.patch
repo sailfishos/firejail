@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jussi Laakkonen <jussi.laakkonen@jolla.com>
 Date: Fri, 7 May 2021 18:29:29 +0300
-Subject: [PATCH] Implement template addition for replacing keys in profile files
+Subject: [PATCH] Implement template addition for replacing keys in profile
+ files
 
 Implement template addition to pass templates as key value pairs as cmd
 line parameters to replace the keys in read profile file lines to allow
@@ -65,19 +66,19 @@ key is not found firejail will exit with an error.
 Man pages for firejail and firejail-profile are updated to include this
 addition.
 ---
- src/firejail/dbus.c          |   2 +-
- src/firejail/firejail.h      |   8 +
- src/firejail/main.c          |  11 +
- src/firejail/profile.c       |  34 +++
- src/firejail/template.c      | 504 +++++++++++++++++++++++++++++++++++
- src/firejail/usage.c         |   1 +
- src/man/firejail-profile.txt |  14 +
- src/man/firejail.txt         |  17 ++
+ src/firejail/dbus.c           |   2 +-
+ src/firejail/firejail.h       |   8 +
+ src/firejail/main.c           |  11 +
+ src/firejail/profile.c        |  34 +++
+ src/firejail/template.c       | 504 ++++++++++++++++++++++++++++++++++
+ src/firejail/usage.c          |   1 +
+ src/man/firejail-profile.5.in |  14 +
+ src/man/firejail.1.in         |  17 ++
  8 files changed, 590 insertions(+), 1 deletion(-)
  create mode 100644 src/firejail/template.c
 
 diff --git a/src/firejail/dbus.c b/src/firejail/dbus.c
-index 66738bd4b..8160bc6be 100644
+index bfc365f1b..3a8c4b8fa 100644
 --- a/src/firejail/dbus.c
 +++ b/src/firejail/dbus.c
 @@ -41,7 +41,7 @@
@@ -90,10 +91,10 @@ index 66738bd4b..8160bc6be 100644
  
  static pid_t dbus_proxy_pid = 0;
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index 4848c3516..c245e40e6 100644
+index 02817b978..11b7d4b39 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
-@@ -922,6 +922,8 @@ void set_sandbox_run_file(pid_t pid, pid_t child);
+@@ -948,6 +948,8 @@ void set_sandbox_run_file(pid_t pid, pid_t child);
  void release_sandbox_lock(void);
  
  // dbus.c
@@ -102,9 +103,9 @@ index 4848c3516..c245e40e6 100644
  int dbus_check_name(const char *name);
  int dbus_check_call_rule(const char *name);
  void dbus_check_profile(void);
-@@ -946,4 +948,10 @@ void run_ids(int argc, char **argv);
- // oom.c
- void oom_set(const char *oom_string);
+@@ -974,4 +976,10 @@ int ll_get_fd(void);
+ int ll_restrict(uint32_t flags);
+ void ll_add_profile(int type, const char *data);
  
 +// template.c
 +void check_template(char *arg);
@@ -114,10 +115,10 @@ index 4848c3516..c245e40e6 100644
 +void template_cleanup();
  #endif
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 6bebf3143..3edfbb09a 100644
+index 7dd9616b9..a52c5e8c6 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
-@@ -2764,6 +2764,11 @@ int main(int argc, char **argv, char **envp) {
+@@ -2699,6 +2699,11 @@ int main(int argc, char **argv, char **envp) {
  				exit_err_feature("networking");
  		}
  #endif
@@ -129,7 +130,7 @@ index 6bebf3143..3edfbb09a 100644
  		//*************************************
  		// command
  		//*************************************
-@@ -2847,6 +2852,9 @@ int main(int argc, char **argv, char **envp) {
+@@ -2787,6 +2792,9 @@ int main(int argc, char **argv, char **envp) {
  		}
  	}
  
@@ -139,9 +140,9 @@ index 6bebf3143..3edfbb09a 100644
  	profile_read_file_list();
  
  	EUID_ASSERT();
-@@ -2972,6 +2980,9 @@ int main(int argc, char **argv, char **envp) {
- 	}
- 	EUID_ASSERT();
+@@ -2911,6 +2919,9 @@ int main(int argc, char **argv, char **envp) {
+ 	if (!arg_quiet)
+ 		print_version(stderr);
  
 +	// Templates are no longer needed as profile files are read
 +	template_cleanup();
@@ -150,10 +151,10 @@ index 6bebf3143..3edfbb09a 100644
  	if (arg_x11_block)
  		x11_block();
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index 4ca9bc2cd..55b11eb50 100644
+index 5675c8e7b..9e657fa46 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1868,6 +1868,40 @@ void profile_read(const char *fname) {
+@@ -1888,6 +1888,40 @@ void profile_read(const char *fname) {
  			msg_printed = 1;
  		}
  
@@ -705,10 +706,10 @@ index 000000000..64bcef5e4
 +	return new_string;
 +}
 diff --git a/src/firejail/usage.c b/src/firejail/usage.c
-index 5b376dc3c..00af44687 100644
+index 69f2c5e43..ebb8ea133 100644
 --- a/src/firejail/usage.c
 +++ b/src/firejail/usage.c
-@@ -256,6 +256,7 @@ static char *usage_str =
+@@ -266,6 +266,7 @@ static const char *const usage_str =
  	"    --shutdown=name|pid - shutdown the sandbox identified by name or PID.\n"
  	"    --tab - enable shell tab completion in sandboxes using private or\n"
  	"\twhitelisted home directories.\n"
@@ -716,11 +717,11 @@ index 5b376dc3c..00af44687 100644
  	"    --timeout=hh:mm:ss - kill the sandbox automatically after the time\n"
  	"\thas elapsed.\n"
  	"    --tmpfs=dirname - mount a tmpfs filesystem on directory dirname.\n"
-diff --git a/src/man/firejail-profile.txt b/src/man/firejail-profile.txt
-index 5b16179ac..5544b471f 100644
---- a/src/man/firejail-profile.txt
-+++ b/src/man/firejail-profile.txt
-@@ -1013,6 +1013,20 @@ Always shut down the sandbox after the first child has terminated. The default b
+diff --git a/src/man/firejail-profile.5.in b/src/man/firejail-profile.5.in
+index 8f11d9725..cf74bb516 100644
+--- a/src/man/firejail-profile.5.in
++++ b/src/man/firejail-profile.5.in
+@@ -1112,6 +1112,20 @@ Always shut down the sandbox after the first child has terminated. The default b
  Join the sandbox identified by name or start a new one.
  Same as "firejail --join=sandboxname" command if sandbox with specified name exists, otherwise same as "name sandboxname".
  
@@ -741,11 +742,11 @@ index 5b16179ac..5544b471f 100644
  .SH FILES
  .TP
  \fB/etc/firejail/appname.profile
-diff --git a/src/man/firejail.txt b/src/man/firejail.txt
-index e5020e37e..1d9e9b16a 100644
---- a/src/man/firejail.txt
-+++ b/src/man/firejail.txt
-@@ -2870,6 +2870,23 @@ Enable shell tab completion in sandboxes using private or whitelisted home direc
+diff --git a/src/man/firejail.1.in b/src/man/firejail.1.in
+index 401f2dfad..3724c866e 100644
+--- a/src/man/firejail.1.in
++++ b/src/man/firejail.1.in
+@@ -3005,6 +3005,23 @@ Enable shell tab completion in sandboxes using private or whitelisted home direc
  .br
  $ firejail \-\-private --tab
  .TP

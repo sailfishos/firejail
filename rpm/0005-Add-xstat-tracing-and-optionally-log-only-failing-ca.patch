@@ -22,11 +22,11 @@ in case of failures also errno.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
 ---
- src/libtrace/libtrace.c | 863 ++++++++++++++++++++++++----------------
- 1 file changed, 524 insertions(+), 339 deletions(-)
+ src/libtrace/libtrace.c | 861 ++++++++++++++++++++++++----------------
+ 1 file changed, 524 insertions(+), 337 deletions(-)
 
 diff --git a/src/libtrace/libtrace.c b/src/libtrace/libtrace.c
-index aa37bb758..bce5460fa 100644
+index 8fd36ec01..8c8978630 100644
 --- a/src/libtrace/libtrace.c
 +++ b/src/libtrace/libtrace.c
 @@ -21,6 +21,8 @@
@@ -387,7 +387,7 @@ index aa37bb758..bce5460fa 100644
  	return rv;
  }
  
-@@ -343,377 +430,475 @@ FILE *fopen(const char *pathname, const char *mode) {
+@@ -343,377 +430,477 @@ FILE *fopen(const char *pathname, const char *mode) {
  typedef FILE *(*orig_fopen64_t)(const char *pathname, const char *mode);
  static orig_fopen64_t orig_fopen64 = NULL;
  FILE *fopen64(const char *pathname, const char *mode) {
@@ -628,7 +628,9 @@ index aa37bb758..bce5460fa 100644
 +		message("%s %d %s %p %d:%d", __func__, dirfd, pathname, statbuf, flags, rv);
 +	return rv;
 +}
-+
+ 
+-	int rv = orig_lstat64(pathname, statbuf);
+-	tprintf(ftty, "%u:%s:lstat64 %s:%d\n", mypid, myname, pathname, rv);
 +int __xstat(int vers, const char *pathname, struct stat *statbuf) {
 +	REAL(int, int vers, const char *pathname, struct stat *statbuf);
 +	int rv = real(vers, pathname, statbuf);
@@ -658,9 +660,7 @@ index aa37bb758..bce5460fa 100644
 +		message("%s %d %s %p:%d", __func__, vers, pathname, statbuf, rv);
 +	return rv;
 +}
- 
--	int rv = orig_lstat64(pathname, statbuf);
--	tprintf(ftty, "%u:%s:lstat64 %s:%d\n", mypid, myname, pathname, rv);
++
 +int __lxstat64(int vers, const char *pathname, struct stat64 *statbuf) {
 +	REAL(int, int vers, const char *pathname, struct stat64 *statbuf);
 +	int rv = real(vers, pathname, statbuf);
@@ -739,7 +739,7 @@ index aa37bb758..bce5460fa 100644
 -	if (!orig_connect)
 -		orig_connect = (orig_connect_t)dlsym(RTLD_NEXT, "connect");
 -
-- 	int rv = orig_connect(sockfd, addr, addrlen);
+-	int rv = orig_connect(sockfd, addr, addrlen);
 -	print_sockaddr(sockfd, "connect", addr, rv);
 -
 +	REAL(int, int sockfd, const struct sockaddr *addr, socklen_t addrlen);
@@ -755,7 +755,7 @@ index aa37bb758..bce5460fa 100644
  // socket
 -typedef int (*orig_socket_t)(int domain, int type, int protocol);
 -static orig_socket_t orig_socket = NULL;
--static char socketbuf[1024];
+ static char socketbuf[1024];
  int socket(int domain, int type, int protocol) {
 -	if (!orig_socket)
 -		orig_socket = (orig_socket_t)dlsym(RTLD_NEXT, "socket");
@@ -853,7 +853,6 @@ index aa37bb758..bce5460fa 100644
 -
 -	int rv = orig_system(command);
 -	tprintf(ftty, "%u:%s:system %s:%d\n", mypid, myname, command, rv);
--
 +	REAL(int, const char *command);
 +	int rv = real(command);
 +	if (rv == -1)
@@ -864,6 +863,7 @@ index aa37bb758..bce5460fa 100644
 +		message("%s %s:%d (unexpected status)", __func__, command, rv);
 +	else if (verbose || WEXITSTATUS(rv))
 +		message("%s %s:%d (exitcode=%d)", __func__, command, rv, WEXITSTATUS(rv));
+ 
  	return rv;
  }
  

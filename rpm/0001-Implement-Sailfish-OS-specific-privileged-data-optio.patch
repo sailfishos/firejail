@@ -30,22 +30,22 @@ get_user_id() function.
 
 Signed-off-by: Simo Piiroinen <simo.piiroinen@jolla.com>
 ---
- src/firejail/firejail.h   |   4 +
- src/firejail/macros.c     |   9 +++
- src/firejail/main.c       | 161 +++++++++++++++-----------------------
- src/firejail/profile.c    |  31 ++++++++
- src/firejail/sandbox.c    |  76 ++++++++++++++++++
+ src/firejail/firejail.h   |   3 +
+ src/firejail/macros.c     |   9 ++
+ src/firejail/main.c       | 180 +++++++++++++++-----------------------
+ src/firejail/profile.c    |  30 +++++++
+ src/firejail/sandbox.c    |  73 ++++++++++++++++
  src/firejail/usage.c      |   1 +
- src/firejail/util.c       |  27 ++++++-
- src/include/euid_common.h |  86 +++++++++++++++-----
+ src/firejail/util.c       |  20 +++--
+ src/include/euid_common.h |  86 ++++++++++++++----
  src/include/rundefs.h     |   1 +
- 9 files changed, 277 insertions(+), 119 deletions(-)
+ 9 files changed, 269 insertions(+), 134 deletions(-)
 
 diff --git a/src/firejail/firejail.h b/src/firejail/firejail.h
-index 13ee573ad..e922e9593 100644
+index 46c95704d..4be4e19d3 100644
 --- a/src/firejail/firejail.h
 +++ b/src/firejail/firejail.h
-@@ -168,6 +168,7 @@ typedef struct config_t {
+@@ -181,6 +181,7 @@ typedef struct config_t {
  	char *home_private_keep;	// keep list for private home directory
  	char *etc_private_keep;	// keep list for private etc directory
  	char *opt_private_keep;	// keep list for private opt directory
@@ -53,7 +53,7 @@ index 13ee573ad..e922e9593 100644
  	char *srv_private_keep;	// keep list for private srv directory
  	char *bin_private_keep;	// keep list for private bin directory
  	char *bin_private_lib;	// executable list sent by private-bin to private-lib
-@@ -466,6 +467,7 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
+@@ -487,6 +488,7 @@ int profile_check_line(char *ptr, int lineno, const char *fname);
  // add a profile entry in cfg.profile list; use str to populate the list
  void profile_add(char *str);
  void profile_add_ignore(const char *str);
@@ -61,7 +61,7 @@ index 13ee573ad..e922e9593 100644
  char *profile_list_normalize(char *list);
  char *profile_list_compress(char *list);
  void profile_list_augment(char **list, const char *items);
-@@ -560,6 +562,7 @@ void wait_for_other(int fd);
+@@ -583,6 +585,7 @@ void wait_for_other(int fd);
  void notify_other(int fd);
  uid_t pid_get_uid(pid_t pid);
  gid_t get_group_id(const char *groupname);
@@ -70,7 +70,7 @@ index 13ee573ad..e922e9593 100644
  int create_empty_dir_as_user(const char *dir, mode_t mode);
  void create_empty_dir_as_root(const char *dir, mode_t mode);
 diff --git a/src/firejail/macros.c b/src/firejail/macros.c
-index 3f9460041..ac42a77ed 100644
+index 012d7a51e..6c9d8185a 100644
 --- a/src/firejail/macros.c
 +++ b/src/firejail/macros.c
 @@ -243,6 +243,13 @@ char *expand_macros(const char *path) {
@@ -97,11 +97,11 @@ index 3f9460041..ac42a77ed 100644
  		int id = macro_id(fname);
  		if (id != -1)
 diff --git a/src/firejail/main.c b/src/firejail/main.c
-index 18e9ae651..129fa9d72 100644
+index 23df12b21..103cdb29c 100644
 --- a/src/firejail/main.c
 +++ b/src/firejail/main.c
 @@ -55,8 +55,7 @@ int __clone2(int (*fn)(void *),
-               /* pid_t *ptid, struct user_desc *tls, pid_t *ctid */ );
+              /* pid_t *ptid, struct user_desc *tls, pid_t *ctid */ );
  #endif
  
 -uid_t firejail_uid = 0;
@@ -110,7 +110,7 @@ index 18e9ae651..129fa9d72 100644
  
  #define STACK_SIZE (1024 * 1024)
  #define STACK_ALIGNMENT 16
-@@ -1061,7 +1060,7 @@ int main(int argc, char **argv, char **envp) {
+@@ -1050,7 +1049,7 @@ int main(int argc, char **argv, char **envp) {
  	orig_umask = umask(022);
  
  	// drop permissions by default and rise them when required
@@ -119,7 +119,7 @@ index 18e9ae651..129fa9d72 100644
  	EUID_USER();
  
  	// check standard streams before opening any file
-@@ -2083,6 +2082,12 @@ int main(int argc, char **argv, char **envp) {
+@@ -2023,6 +2022,12 @@ int main(int argc, char **argv, char **envp) {
  			else
  				exit_err_feature("private-opt");
  		}
@@ -132,11 +132,10 @@ index 18e9ae651..129fa9d72 100644
  		else if (strncmp(argv[i], "--private-srv=", 14) == 0) {
  			if (checkcfg(CFG_PRIVATE_SRV)) {
  				// extract private srv list
-@@ -3143,124 +3148,88 @@ int main(int argc, char **argv, char **envp) {
- 
+@@ -3066,146 +3071,101 @@ int main(int argc, char **argv, char **envp) {
  	if (arg_noroot) {
  		// update the UID and GID maps in the new child user namespace
--		// uid
+ 		// uid
 -		char *map_path;
 -		if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
 -			errExit("asprintf");
@@ -164,7 +163,11 @@ index 18e9ae651..129fa9d72 100644
 +				}
 +			}
 +		}
-+
+ 
+-		char *map;
+-		uid_t uid = getuid();
+-		if (asprintf(&map, "%d %d 1", uid, uid) == -1)
+-			errExit("asprintf");
 +		auto char *id_map(void) {
 +			char *ptr = map_data;
 +			for (int i = 0; i < id_cnt; ++i) {
@@ -175,13 +178,10 @@ index 18e9ae651..129fa9d72 100644
 +			id_cnt = 0;
 +			return map_data;
 +		}
- 
--		char *map;
--		uid_t uid = getuid();
--		if (asprintf(&map, "%d %d 1", uid, uid) == -1)
++
 +		// UIDs
 +		if (asprintf(&map_path, "/proc/%d/uid_map", child) == -1)
- 			errExit("asprintf");
++ 			errExit("asprintf");
 +		id_add(0);
 +		id_add(euid_data.uid);
 +		id_add(euid_data.privileged_uid);
@@ -204,23 +204,29 @@ index 18e9ae651..129fa9d72 100644
 -		gid_t gid = getgid();
 -		sprintf(ptr, "%d %d 1\n", gid, gid);
 -		ptr += strlen(ptr);
- 
+-
 -		gid_t g;
 +		id_add(0);
 +		id_add(euid_data.gid);
 +		id_add(euid_data.primary_gid);
 +		id_add(euid_data.privileged_gid);
  		if (!arg_nogroups || !check_can_drop_all_groups()) {
- 			// add audio group
+ 			// add audio groups
  			if (!arg_nosound) {
 -				g = get_group_id("audio");
 -				if (g) {
 -					sprintf(ptr, "%d %d 1\n", g, g);
 -					ptr += strlen(ptr);
 -				}
+-				g = get_group_id("pipewire");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
 +				id_add(get_group_id("audio"));
++				id_add(get_group_id("pipewire")); // XXX
  			}
--
+ 
  			// add video group
  			if (!arg_novideo) {
 -				g = get_group_id("video");
@@ -228,10 +234,7 @@ index 18e9ae651..129fa9d72 100644
 -					sprintf(ptr, "%d %d 1\n", g, g);
 -					ptr += strlen(ptr);
 -				}
-+				id_add(get_group_id("video"));
- 			}
-+			// We don't use the groups render/vglusers, cdrom/optical
-+			// or lp (printers). See JB#59121 for details.
+-			}
 -
 -			// add render/vglusers group
 -			if (!arg_no3d) {
@@ -268,8 +271,11 @@ index 18e9ae651..129fa9d72 100644
 -					sprintf(ptr, "%d %d 1\n", g, g);
 -					ptr += strlen(ptr);
 -				}
--			}
--
++				id_add(get_group_id("video"));
+ 			}
+ 
++			// We don't use the groups render/vglusers, cdrom/optical
++			// or lp (printers). See JB#59121 for details.
  			// add input group
  			if (!arg_noinput) {
 -				g = get_group_id("input");
@@ -279,8 +285,28 @@ index 18e9ae651..129fa9d72 100644
 -				}
 +				id_add(get_group_id("input"));
  			}
+ 
+ 			// add tss group
+ 			if (arg_keep_dev_tpm) {
+-				g = get_group_id("tss");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
++				id_add(get_group_id("tss"));
+ 			}
+ 
+ 			// add plugdev group
+ 			if (!arg_nou2f) {
+-				g = get_group_id("plugdev");
+-				if (g) {
+-					sprintf(ptr, "%d %d 1\n", g, g);
+-					ptr += strlen(ptr);
+-				}
++				id_add(get_group_id("plugdev"));
+ 			}
  		}
--
+ 
  		if (!arg_nogroups) {
 -			// add firejail group
 -			g = get_group_id("firejail");
@@ -316,10 +342,10 @@ index 18e9ae651..129fa9d72 100644
  		free(map_path);
  	}
 diff --git a/src/firejail/profile.c b/src/firejail/profile.c
-index acf206da6..c5dd43521 100644
+index 8c21bb744..82b4d340b 100644
 --- a/src/firejail/profile.c
 +++ b/src/firejail/profile.c
-@@ -1382,6 +1382,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
+@@ -1465,6 +1465,15 @@ int profile_check_line(char *ptr, int lineno, const char *fname) {
  		return 0;
  	}
  
@@ -335,7 +361,7 @@ index acf206da6..c5dd43521 100644
  	// private /srv list of files and directories
  	if (strncmp(ptr, "private-srv ", 12) == 0) {
  		if (checkcfg(CFG_PRIVATE_SRV)) {
-@@ -1864,6 +1873,28 @@ void profile_read(const char *fname) {
+@@ -1884,6 +1893,27 @@ void profile_read(const char *fname) {
  	fclose(fp);
  }
  
@@ -360,15 +386,14 @@ index acf206da6..c5dd43521 100644
 +	return beg;
 +}
 +
-+
- char *profile_list_normalize(char *list)
- {
+ char *profile_list_normalize(char *list) {
  	/* Remove redundant commas.
+ 	 *
 diff --git a/src/firejail/sandbox.c b/src/firejail/sandbox.c
-index 77fe73174..0377293de 100644
+index 05423a911..8cd4cec80 100644
 --- a/src/firejail/sandbox.c
 +++ b/src/firejail/sandbox.c
-@@ -912,6 +912,82 @@ int sandbox(void* sandbox_arg) {
+@@ -915,6 +915,79 @@ int sandbox(void* sandbox_arg) {
  	if (arg_private_dev)
  		fs_private_dev();
  
@@ -380,9 +405,6 @@ index 77fe73174..0377293de 100644
 +
 +		if (cfg.chrootdir) {
 +			fwarning("privileged-data feature is disabled in chroot\n");
-+		}
-+		else if (arg_overlay) {
-+			fwarning("privileged-data feature is disabled in overlay\n");
 +		}
 +		else if (euid_data.privileged_uid == INVALID_UID || euid_data.privileged_gid == INVALID_GID) {
 +			fwarning("privileged-data feature is disabled - no \"privileged\" user\n");
@@ -452,10 +474,10 @@ index 77fe73174..0377293de 100644
  		if (cfg.chrootdir)
  			fwarning("private-opt feature is disabled in chroot\n");
 diff --git a/src/firejail/usage.c b/src/firejail/usage.c
-index 0a4c8a483..5b376dc3c 100644
+index 1554b1c31..69f2c5e43 100644
 --- a/src/firejail/usage.c
 +++ b/src/firejail/usage.c
-@@ -210,6 +210,7 @@ static char *usage_str =
+@@ -220,6 +220,7 @@ static const char *const usage_str =
  	"    --private-cwd=directory - set working directory inside jail.\n"
  	"    --private-opt=file,directory - build a new /opt in a temporary filesystem.\n"
  	"    --private-srv=file,directory - build a new /srv in a temporary filesystem.\n"
@@ -464,10 +486,10 @@ index 0a4c8a483..5b376dc3c 100644
  	"    --profile.print=name|pid - print the name of profile file.\n"
  	"    --protocol=protocol,protocol,protocol - enable protocol filter.\n"
 diff --git a/src/firejail/util.c b/src/firejail/util.c
-index a01290cf2..147e5d22d 100644
+index f41157d23..ac0b4edac 100644
 --- a/src/firejail/util.c
 +++ b/src/firejail/util.c
-@@ -160,7 +160,7 @@
+@@ -162,7 +162,7 @@ static int copy_group_ifcont(const char *groupname,
  	}
  
  	gid_t g = get_group_id(groupname);
@@ -476,7 +498,7 @@ index a01290cf2..147e5d22d 100644
  		new_groups[*new_ngroups] = g;
  		(*new_ngroups)++;
  	}
-@@ -281,9 +292,9 @@ void drop_privs(int force_nogroups) {
+@@ -294,9 +294,9 @@ void drop_privs(int force_nogroups) {
  		clean_supplementary_groups(gid);
  
  	// set uid/gid
@@ -488,7 +510,7 @@ index a01290cf2..147e5d22d 100644
  		errExit("setresuid");
  }
  
-@@ -871,6 +882,9 @@ void update_map(char *mapping, char *map_file) {
+@@ -882,6 +882,9 @@ void update_map(char *mapping, char *map_file) {
  		if (mapping[j] == ',')
  			mapping[j] = '\n';
  
@@ -498,7 +520,10 @@ index a01290cf2..147e5d22d 100644
  	fd = open(map_file, O_RDWR|O_CLOEXEC);
  	if (fd == -1) {
  		fprintf(stderr, "Error: cannot open %s: %s\n", map_file, strerror(errno));
-@@ -955,11 +969,18 @@ gid_t get_group_id(const char *groupname) {
+@@ -962,14 +965,21 @@ void notify_other(int fd) {
+ 
+ 
+ gid_t get_group_id(const char *groupname) {
 -	gid_t gid = 0;
 +	gid_t gid = INVALID_GID;
  	struct group *g = getgrnam(groupname);
@@ -520,7 +545,7 @@ index a01290cf2..147e5d22d 100644
  // flush stdin if it is connected to a tty and has input
  void flush_stdin(void) {
 diff --git a/src/include/euid_common.h b/src/include/euid_common.h
-index 63352dfaa..29ceaa1bb 100644
+index fcafe41b8..1cc949ca8 100644
 --- a/src/include/euid_common.h
 +++ b/src/include/euid_common.h
 @@ -24,36 +24,84 @@
@@ -610,7 +635,7 @@ index 63352dfaa..29ceaa1bb 100644
  
 -static inline void EUID_INIT(void) {
 -	firejail_uid = getuid();
--	firejail_gid = getegid();
+-	firejail_gid = getgid();
 +	if ((pw = getpwnam(PRIVILEGED_USER))) {
 +		euid_data.privileged_uid = pw->pw_uid;
 +		euid_data.privileged_gid = pw->pw_gid;
@@ -628,7 +653,7 @@ index 63352dfaa..29ceaa1bb 100644
  
  #endif
 diff --git a/src/include/rundefs.h b/src/include/rundefs.h
-index 079670f10..5aedcb32b 100644
+index 4558cc853..6b7653306 100644
 --- a/src/include/rundefs.h
 +++ b/src/include/rundefs.h
 @@ -45,6 +45,7 @@

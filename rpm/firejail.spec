@@ -1,21 +1,17 @@
 Name: firejail
-Version: 0.9.72
+Version: 0.9.78
 Release: 1
 Summary: Linux namepaces sandbox program
 License: GPLv2+
 Source0: %{name}-%{version}.tar.bz2
 # Sailfish OS patches
-Patch1: 0001-Preserve-process-effective-group-for-privileged-grou.patch
-Patch2: 0002-Implement-Sailfish-OS-specific-privileged-data-optio.patch
-Patch3: 0003-Add-profile-files-to-a-list-when-processing-argument.patch
-Patch4: 0004-Implement-template-addition-for-replacing-keys-in-pr.patch
-Patch5: 0005-Retain-symlink-chains.patch
-Patch6: 0006-Add-xstat-tracing-and-optionally-log-only-failing-ca.patch
-Patch7: 0007-Revert-deprecating-shell-3-5196.patch
-Patch8: 0008-refactor-make-rundir-lock-variables-global.patch
-Patch9: 0009-modif-improve-flock-handling.patch
-Patch10: 0010-modif-populate-run-firejail-while-holding-flock.patch
-Patch11: 0011-Revert-new-version-for-NixOS-4887.patch
+Patch1: 0001-Implement-Sailfish-OS-specific-privileged-data-optio.patch
+Patch2: 0002-Add-profile-files-to-a-list-when-processing-argument.patch
+Patch3: 0003-Implement-template-addition-for-replacing-keys-in-pr.patch
+Patch4: 0004-Retain-symlink-chains.patch
+Patch5: 0005-Add-xstat-tracing-and-optionally-log-only-failing-ca.patch
+Patch6: 0006-Revert-deprecating-shell-3-5196.patch
+Patch7: 0007-Revert-new-version-for-NixOS-4887.patch
 
 URL: https://github.com/sailfishos/firejail
 
